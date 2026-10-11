@@ -1,14 +1,3 @@
-"""
-agent.py — Cinephile LangGraph agent.
-
-Loads tools from the local MCP server (mcp/server.py) and exposes:
-    build_agent(model_name=None)                  → compiled LangGraph agent (cached per model)
-    run_agent(message, thread_id, model_name)     → assistant reply text
-    shutdown()                                    → close the checkpoint DB (call on app exit)
-
-Run standalone for CLI testing:
-    python agent.py
-"""
 
 import asyncio
 import os
@@ -24,173 +13,248 @@ load_dotenv()
 os.environ["SSL_CERT_FILE"] = certifi.where()
 os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
 
-from groq import RateLimitError                                      # noqa: E402
-from langchain_core.messages import SystemMessage                    # noqa: E402
-from langchain_groq import ChatGroq                                  # noqa: E402
-from langchain_mcp_adapters.client import MultiServerMCPClient       # noqa: E402
-from langchain_mcp_adapters.tools import load_mcp_tools              # noqa: E402
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver         # noqa: E402
-from langgraph.graph import START, MessagesState, StateGraph         # noqa: E402
-from langgraph.prebuilt import ToolNode, tools_condition             # noqa: E402
+from langchain_core.messages import SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 
-# Anchor every path to this file, so it works no matter where you launch it from.
+# --------------------------------------------------------------------------- #
+# PATHS
+# --------------------------------------------------------------------------- #
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-
-# --------------------------------------------------------------------------- #
-# CONFIG
-# --------------------------------------------------------------------------- #
-DEFAULT_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
-
-ALLOWED_MODELS = {
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
-}
-
-MCP_SERVER_PATH = BASE_DIR / "mcp" / "server.py"
+MCP_SERVER_PATH = BASE_DIR / "mcp_server" / "server.py"
 CHECKPOINT_DB = DATA_DIR / "checkpoints.db"
 
 
+# --------------------------------------------------------------------------- #
+# CONFIGURATION
+# --------------------------------------------------------------------------- #
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.8-flash",
+)
+if not GEMINI_API_KEY:
+    raise ValueError(
+        "GEMINI_API_KEY is missing. Add it to your .env file."
+    )
+
+if not MCP_SERVER_PATH.exists():
+    raise FileNotFoundError(
+        f"MCP server not found: {MCP_SERVER_PATH}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# SYSTEM PROMPT
+# --------------------------------------------------------------------------- #
+
 SYSTEM_PROMPT = """
-You are Cinephile, the user's personal movie and TV show recommender.
+You are Cinephile, a friendly movie and TV recommendation assistant.
 
-PERSONALITY:
-Speak like a knowledgeable, passionate cinephile and a friend who understands cinema.
-Be conversational, insightful, and never pretentious.
+Recommend titles based on the user's preferences, mood, genres, themes,
+pacing, and reviews. Briefly explain why each recommendation fits.
 
-RECOMMENDATIONS:
-Recommend titles based on the user's taste, considering genre, atmosphere, themes,
-pacing, storytelling, and emotional impact. Explain briefly why each recommendation
-fits. Favor quality over quantity and introduce hidden gems when appropriate.
+Use available tools for searching titles, finding similar shows, managing
+favorites and watchlists, and saving reviews. Never invent search results
+or claim an action succeeded without confirmation.
 
-PERSONALIZATION:
-Use available conversation history, favorites, watching lists, and reviews to personalize
-recommendations. Ask follow-up questions only when necessary.
-
-TOOLS:
-- search_movies(query): Search TMDB for titles.
-- get_movie_details(tmdb_id): Full details for one movie.
-- get_similar_movies(tmdb_id), get_recommended_movies(tmdb_id): "More like this".
-- get_trending_movies(window), discover_movies(...), list_genres(): Discovery.
-- add_favorite(tmdb_id, title), list_favorites(), remove_favorite(tmdb_id).
-- set_watching(tmdb_id, title), list_watching(), remove_watching(tmdb_id).
-- save_review(tmdb_id, rating, comment), get_review(tmdb_id), list_reviews().
-- get_user_profile(), recommend_for_user(limit): Personalized context.
-
-Use tools when needed. Always resolve titles to a tmdb_id via search_movies before
-saving favorites, watching entries, or reviews. Never invent results or claim an action
-succeeded without confirmation. Treat similar-title results as candidates, not
-guaranteed personalized recommendations.
-
-RULES:
-Avoid spoilers unless requested. Distinguish facts from opinions. Be honest when uncertain.
-Answer directly, keep responses concise, and never recommend titles solely because
-they are popular or highly rated.
-
-Your goal is to understand the user's taste and help them discover films they'll love.
+Resolve ambiguous titles before saving them. Avoid spoilers unless asked.
+Use conversation history when relevant. Be concise, honest, and conversational.
 """
 
 
 # --------------------------------------------------------------------------- #
-# HELPERS
+# MODEL HELPERS
 # --------------------------------------------------------------------------- #
-def normalize_model_name(model_name: str | None) -> str:
-    if not model_name:
-        return DEFAULT_MODEL
 
-    model_name = model_name.strip()
+def get_llm(model_name: str | None = None):
+    """
+    Create a Google Gemini chat model.
 
-    if model_name not in ALLOWED_MODELS:
-        return DEFAULT_MODEL
+    Examples:
+        get_llm()
+        get_llm("gemini-2.5-flash")
+        get_llm("gemini-2.5-pro")
+    """
 
-    return model_name
+    model = (model_name or GEMINI_MODEL).strip()
 
+    if not model:
+        model = GEMINI_MODEL
 
-def get_llm(model_name: str | None = None) -> ChatGroq:
-    # max_retries: let the client back off and retry on Groq's own 429s
-    return ChatGroq(model=normalize_model_name(model_name), temperature=0.3, max_retries=4)
+    return ChatGoogleGenerativeAI(
+        model=model,
+        google_api_key=GEMINI_API_KEY,
+        temperature=0.3,
+        max_retries=4,
+    )
 
 
 def extract_text(content) -> str:
-    """Message content is a str for most models, but can be a list of blocks."""
+    """Extract readable text from a model response."""
+
     if isinstance(content, str):
         return content
+
     if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+        parts = []
+
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+
+        return "".join(parts)
+
     return str(content)
 
 
 # --------------------------------------------------------------------------- #
-# AGENT — lazy singletons (tools + checkpointer shared, one graph per model)
+# AGENT STATE
 # --------------------------------------------------------------------------- #
+
 _lock = asyncio.Lock()
+
 _tools = None
 _checkpointer: AsyncSqliteSaver | None = None
-_agents: dict[str, object] = {}
 
+# Cache one graph per Gemini model.
+_agents: dict[str, object] = {}
 
 _mcp_task: asyncio.Task | None = None
 _mcp_stop: asyncio.Event | None = None
 
 
-async def _mcp_session_runner(ready: asyncio.Future, stop: asyncio.Event) -> None:
-    """Keep ONE MCP session (and one server process) open for the life of the app.
+# --------------------------------------------------------------------------- #
+# MCP SESSION
+# --------------------------------------------------------------------------- #
 
-    Without this, every tool call spawns a fresh server process and re-lists the tools,
-    which is what made each call slow. It runs in its own task so the session is opened
-    and closed in the same task, which the MCP client library requires.
+async def _mcp_session_runner(
+    ready: asyncio.Future,
+    stop: asyncio.Event,
+) -> None:
     """
+    Keep one MCP session open while the application is running.
+
+    The MCP session stays in the same task for its entire lifetime.
+    """
+
     client = MultiServerMCPClient(
         {
             "movies": {
                 "command": sys.executable,
                 "args": [str(MCP_SERVER_PATH)],
                 "transport": "stdio",
-                # No "env" here: tmdb.py loads the project .env itself. Passing your whole
-                # shell environment triggers the "env['PS1'] contains unexpanded variable" warning.
             }
         }
     )
+
     try:
         async with client.session("movies") as session:
             tools = await load_mcp_tools(session)
-            ready.set_result(tools)
+
+            if not ready.done():
+                ready.set_result(tools)
+
             await stop.wait()
-    except Exception as e:
+
+    except Exception as exc:
         if not ready.done():
-            ready.set_exception(e)  # startup failure: surface it to build_agent()
+            ready.set_exception(exc)
         else:
             raise
 
 
 async def _load_mcp_tools():
-    """Start the MCP server once and return its tools."""
-    global _mcp_task, _mcp_stop
-    ready: asyncio.Future = asyncio.get_running_loop().create_future()
-    _mcp_stop = asyncio.Event()
-    _mcp_task = asyncio.create_task(_mcp_session_runner(ready, _mcp_stop))
-    return await ready
+    """Start the MCP server once and load its tools."""
 
+    global _mcp_task, _mcp_stop
+
+    loop = asyncio.get_running_loop()
+
+    ready = loop.create_future()
+    _mcp_stop = asyncio.Event()
+
+    _mcp_task = asyncio.create_task(
+        _mcp_session_runner(ready, _mcp_stop)
+    )
+
+    try:
+        return await ready
+    except Exception:
+        if _mcp_stop is not None:
+            _mcp_stop.set()
+
+        if _mcp_task is not None:
+            try:
+                await _mcp_task
+            except Exception:
+                pass
+
+        _mcp_task = None
+        _mcp_stop = None
+
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# SQLITE CHECKPOINTER
+# --------------------------------------------------------------------------- #
 
 async def _get_checkpointer() -> AsyncSqliteSaver:
-    # The graph is async (MCP tools are async-only), so it needs the ASYNC saver.
-    # The sync SqliteSaver raises NotImplementedError on ainvoke/astream.
+    """
+    Create the asynchronous SQLite checkpointer once.
+
+    It stores conversation state using LangGraph's thread_id.
+    """
+
     global _checkpointer
+
     if _checkpointer is None:
         conn = await aiosqlite.connect(str(CHECKPOINT_DB))
-        _checkpointer = AsyncSqliteSaver(conn)
-        await _checkpointer.setup()
+
+        try:
+            checkpointer = AsyncSqliteSaver(conn)
+            await checkpointer.setup()
+        except Exception:
+            await conn.close()
+            raise
+
+        _checkpointer = checkpointer
+
     return _checkpointer
 
 
+# --------------------------------------------------------------------------- #
+# BUILD AGENT
+# --------------------------------------------------------------------------- #
+
 async def build_agent(model_name: str | None = None):
-    """Build (or return the cached) Cinephile graph for the chosen model."""
+    """
+    Build or retrieve a cached Cinephile graph for a Gemini model.
+
+    If no model is provided, GEMINI_MODEL from .env is used.
+    """
+
     global _tools
 
-    model = normalize_model_name(model_name)
+    model = (model_name or GEMINI_MODEL).strip()
+
+    if not model:
+        model = GEMINI_MODEL
 
     if model in _agents:
         return _agents[model]
@@ -199,100 +263,171 @@ async def build_agent(model_name: str | None = None):
         if model in _agents:
             return _agents[model]
 
+        # Start MCP and load tools only once.
         if _tools is None:
             _tools = await _load_mcp_tools()
 
-        llm = get_llm(model).bind_tools(_tools)
+        # Create the selected Gemini model and bind MCP tools.
+        model_llm = get_llm(model).bind_tools(_tools)
 
-        # -------- node: call the LLM --------
+        # ---------------- LLM NODE ---------------- #
+
         async def call_model(state: MessagesState):
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
-            response = await llm.ainvoke(messages)
+            messages = [
+                SystemMessage(content=SYSTEM_PROMPT)
+            ] + state["messages"]
+
+            response = await model_llm.ainvoke(messages)
+
             return {"messages": [response]}
 
-        # -------- graph --------
+        # ---------------- GRAPH ---------------- #
+
         builder = StateGraph(MessagesState)
+
         builder.add_node("agent", call_model)
         builder.add_node("tools", ToolNode(_tools))
+
         builder.add_edge(START, "agent")
-        builder.add_conditional_edges("agent", tools_condition)
+        builder.add_conditional_edges(
+            "agent",
+            tools_condition,
+        )
         builder.add_edge("tools", "agent")
 
-        _agents[model] = builder.compile(checkpointer=await _get_checkpointer())
-        return _agents[model]
+        checkpointer = await _get_checkpointer()
 
+        agent = builder.compile(
+            checkpointer=checkpointer
+        )
 
-async def shutdown() -> None:
-    """Close the MCP server and the checkpoint database (call when your app exits)."""
-    global _checkpointer, _mcp_task, _mcp_stop
-    if _mcp_stop is not None:
-        _mcp_stop.set()
-    if _mcp_task is not None:
-        try:
-            await _mcp_task
-        except Exception:
-            pass
-        _mcp_task = _mcp_stop = None
-    if _checkpointer is not None:
-        await _checkpointer.conn.close()
-        _checkpointer = None
+        _agents[model] = agent
+
+        return agent
 
 
 # --------------------------------------------------------------------------- #
-# CONVENIENCE RUNNER — used by bridge.py /api/chat
+# RUN AGENT
 # --------------------------------------------------------------------------- #
-async def run_agent(message: str, thread_id: str = "default", model_name: str | None = None) -> str:
+
+async def run_agent(
+    message: str,
+    thread_id: str = "default",
+    model_name: str | None = None,
+) -> str:
     """
-    Invoke the agent for one turn.
+    Run one conversation turn.
 
     Args:
-        message:    The user's message.
-        thread_id:  Conversation id — used by the checkpointer to persist history.
-        model_name: Optional model id (must be in ALLOWED_MODELS, else the default is used).
+        message: User's message.
+        thread_id: Conversation identifier for persistent history.
+        model_name: Optional Gemini model ID.
 
     Returns:
-        The assistant's reply text.
+        The assistant's final text response.
     """
+
     agent = await build_agent(model_name)
 
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
 
-    try:
-        result = await agent.ainvoke(
-            {"messages": [{"role": "user", "content": message}]},
-            config=config,
-        )
-    except RateLimitError:
-        return "I've hit the Groq rate limit. Give it a minute and try again."
+    result = await agent.ainvoke(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": message,
+                }
+            ]
+        },
+        config=config,
+    )
 
     return extract_text(result["messages"][-1].content)
 
 
 # --------------------------------------------------------------------------- #
-# CLI — python agent.py
+# SHUTDOWN
 # --------------------------------------------------------------------------- #
+
+async def shutdown() -> None:
+    """Close the MCP session and SQLite connection."""
+
+    global _checkpointer, _mcp_task, _mcp_stop, _tools
+
+    if _mcp_stop is not None:
+        _mcp_stop.set()
+
+    if _mcp_task is not None:
+        try:
+            await _mcp_task
+        except Exception as exc:
+            print(f"MCP shutdown warning: {exc}")
+
+        _mcp_task = None
+        _mcp_stop = None
+
+    if _checkpointer is not None:
+        await _checkpointer.conn.close()
+        _checkpointer = None
+
+    _tools = None
+    _agents.clear()
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+
 async def _cli() -> None:
-    print("Cinephile — type 'exit' to quit.\n")
+    print("Cinephile — Google Gemini Edition")
+    print(f"Model: {GEMINI_MODEL}")
+    print("Type 'exit' to quit.\n")
+
     thread_id = "cli"
 
     try:
         while True:
             try:
-                user = (await asyncio.to_thread(input, "You: ")).strip()
+                user = (
+                    await asyncio.to_thread(
+                        input,
+                        "You: ",
+                    )
+                ).strip()
+
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
 
             if user.lower() in {"exit", "quit"}:
                 break
+
             if not user:
                 continue
 
-            reply = await run_agent(user, thread_id)
-            print(f"\nCinephile: {reply}\n")
+            try:
+                reply = await run_agent(
+                    message=user,
+                    thread_id=thread_id,
+                )
+
+                print(f"\nCinephile: {reply}\n")
+
+            except Exception as exc:
+                print(f"\nError: {exc}\n")
+
     finally:
         await shutdown()
 
+
+# --------------------------------------------------------------------------- #
+# ENTRY POINT
+# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
     asyncio.run(_cli())

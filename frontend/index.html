@@ -125,6 +125,20 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .detail-panel .similar-list { grid-template-columns:repeat(3,minmax(0,1fr)); }
   .user-message { max-width:95%; }
 }
+
+
+/* Hide scrollbar visuals while preserving normal scrolling */
+html, body, *, *::before, *::after {
+  scrollbar-width: none !important;       /* Firefox */
+  -ms-overflow-style: none !important;    /* legacy Edge/IE */
+}
+*::-webkit-scrollbar {
+  display: none !important;               /* Chrome, Safari, Chromium */
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
 </style>
 </head>
 <body>
@@ -215,7 +229,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   This UI can be previewed without a backend; local demo storage is used for library
   features until API endpoints are configured. Chat requires a working /chat endpoint.
 */
-const API_BASE = ""; // Example: "http://127.0.0.1:8000"
+const API_BASE = "http://127.0.0.1:8000"; // Example: "http://127.0.0.1:8000"
 const API = {
   chat: "/chat",
   search: "/search",
