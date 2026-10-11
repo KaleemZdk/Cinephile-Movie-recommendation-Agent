@@ -46,7 +46,7 @@ function assistantMessage() {
   const paint = () => { frame = 0; prose.innerHTML = renderMarkdown(text); };
   const idle = () => { typing.hidden = true; status.hidden = true; };
 
-  const api_ = {
+  const message = {
     root,
     text: () => text,
     status(label) {
@@ -100,7 +100,7 @@ function assistantMessage() {
       ));
     },
   };
-  return api_;
+  return message;
 }
 
 function savedAssistant(message) {

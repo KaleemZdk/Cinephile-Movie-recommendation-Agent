@@ -42,6 +42,9 @@
 .thread-open .icon { width: 14px; height: 14px; color: var(--accent-text); }
 .thread-tools { display: none; gap: 0; padding-right: var(--space-1); }
 .thread:hover .thread-tools, .thread:focus-within .thread-tools { display: flex; }
+@media (hover: none) {
+  .thread-tools { display: flex; }
+}
 .threads-empty { padding: var(--space-4); font-size: var(--text-sm); color: var(--text-3); }
 
 .sidebar-foot { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3); border-top: 1px solid var(--border); }

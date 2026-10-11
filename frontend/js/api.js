@@ -7,7 +7,11 @@ async function request(path, { method = "GET", body, signal } = {}) {
     body: body ? JSON.stringify(body) : undefined,
     signal,
   });
-  if (!response.ok) throw new Error(await errorMessage(response));
+  if (!response.ok) {
+    const error = new Error(await errorMessage(response));
+    error.status = response.status;
+    throw error;
+  }
   return response.status === 204 ? null : response.json();
 }
 
@@ -15,7 +19,7 @@ async function errorMessage(response) {
   try {
     const data = await response.json();
     if (typeof data.detail === "string") return data.detail;
-    if (Array.isArray(data.detail) && data.detail[0]?.msg) return data.detail[0].msg;
+    if (Array.isArray(data.detail) && data.detail[0]?.msg) return data.detail[0].msg.replace(/^Value error, /, "");
   } catch { /* not JSON */ }
   return `Request failed (${response.status}).`;
 }
@@ -65,6 +69,8 @@ const item = (it) => ({
 });
 
 const idOf = (it) => it.tmdb_id ?? it.id;
+/** "/favorites/movie/27205": library items are addressed by type and TMDB id. */
+const titlePath = (base, it) => `${base}/${it.media_type || "movie"}/${idOf(it)}`;
 
 export const api = {
   health: () => request("/health"),
@@ -89,17 +95,22 @@ export const api = {
   favorites: {
     list: () => request("/favorites"),
     add: (it) => request("/favorites", { method: "POST", body: item(it) }),
-    remove: (it) => request(`/favorites/${idOf(it)}${query({ media_type: it.media_type })}`, { method: "DELETE" }),
+    remove: (it) => request(titlePath("/favorites", it), { method: "DELETE" }),
   },
   watching: {
     list: () => request("/watching"),
     add: (it, status) => request("/watching", { method: "POST", body: { ...item(it), status } }),
-    setStatus: (it, status) => request(`/watching/${idOf(it)}${query({ media_type: it.media_type })}`, { method: "PATCH", body: { status } }),
-    remove: (it) => request(`/watching/${idOf(it)}${query({ media_type: it.media_type })}`, { method: "DELETE" }),
+    setStatus: (it, status) => request(titlePath("/watching", it), { method: "PATCH", body: { status } }),
+    remove: (it) => request(titlePath("/watching", it), { method: "DELETE" }),
   },
   reviews: {
     list: () => request("/reviews"),
+    /** The user's review of one title, or null if there is none. */
+    get: (it) => request(titlePath("/reviews", it)).catch((error) => {
+      if (error.status === 404) return null;
+      throw error;
+    }),
     save: (it, rating, comment) => request("/reviews", { method: "POST", body: { ...item(it), rating, comment } }),
-    remove: (it) => request(`/reviews/${idOf(it)}${query({ media_type: it.media_type })}`, { method: "DELETE" }),
+    remove: (it) => request(titlePath("/reviews", it), { method: "DELETE" }),
   },
 };

@@ -2,15 +2,16 @@
 import { api } from "./api.js";
 import { h } from "./dom.js";
 import { icon } from "./icons.js";
-import { deleteReview, keyOf, saveReview } from "./store.js";
+import { deleteReview, reviewRating, saveReview } from "./store.js";
 import { confirmDialog, openModal, toast } from "./ui.js";
 
 export async function openReviewModal(item) {
   let existing = null;
-  try {
-    const all = await api.reviews.list();
-    existing = all.find((r) => keyOf(r) === keyOf(item)) || null;
-  } catch { /* treat as a new review */ }
+  if (reviewRating(item) != null) {
+    try {
+      existing = await api.reviews.get(item);
+    } catch { /* treat as a new review */ }
+  }
 
   let rating = existing ? Number(existing.rating) : 0;
   const readout = h("span", { class: "rating-readout" });

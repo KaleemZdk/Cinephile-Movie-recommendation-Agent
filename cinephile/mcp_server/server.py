@@ -1,46 +1,33 @@
-"""
-mcp_server/server.py - MCP server exposing movie and TV recommendation tools.
+"""MCP tools for the Cinephile agent.
 
-Combines:
-  * TMDB API (search / details / similar / trending / discover) for movies and TV shows
-  * Local SQLite state (favorites / watching / reviews)
+Combines TMDB lookups (movies and TV) with the user's library in SQLite. Tools that save
+or look up a title accept a plain `title` (optionally with `media_type` and `year`), so
+the agent does not need to search first. When a title is ambiguous the tool returns
+`needs_clarification` with candidates instead of guessing.
 
-Run (stdio, for LangGraph):
-    python mcp_server/server.py
-
-Run (HTTP transport):
-    python mcp_server/server.py --http
-
-Tools that save or look up a title accept a plain `title` (optionally with `media_type`
-and `year`), so the agent does not need a separate search first. If a title is ambiguous
-the tool returns `needs_clarification` with candidates instead of guessing.
+Every tool returns compact JSON text: it is read by the model, and size costs latency.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-try:
-    from . import database, recommend, tmdb
-except ImportError:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import database
-    import recommend
-    import tmdb
+from cinephile import recommend, tmdb
+from cinephile.storage import library
+from cinephile.storage.db import WATCH_STATUSES, normalize_media_type
+from cinephile.storage.library import TitleRef
 
-database.init_db()
+LIST_LIMIT = 10  # results handed to the model per call
 
 mcp = FastMCP(
-    "movie-recommender",
+    "cinephile",
     instructions=(
         "Tools for a movie and TV recommendation agent.\n"
-        "- Find titles: search_shows, get_details, get_similar, get_trending, "
-        "discover, list_genres.\n"
+        "- Find titles: search_shows, get_details, get_similar, get_trending, discover, list_genres.\n"
         "- The user's library: add_favorite, list_favorites, remove_favorite, set_watching, "
         "list_watching, remove_watching, save_review, get_review, list_reviews.\n"
         "- get_user_profile returns everything the user saved; recommend_for_user builds a "
@@ -54,8 +41,6 @@ mcp = FastMCP(
 # Helpers
 # --------------------------------------------------------------------------- #
 
-LIST_LIMIT = 10  # results handed to the model per call (keeps prompts small and fast)
-
 
 def _dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -65,11 +50,13 @@ def _err(message: str, **extra: Any) -> str:
     return _dumps({"error": message, **extra})
 
 
-_card = tmdb.card
+def _listing(results: list[dict], **extra: Any) -> str:
+    shown = results[:LIST_LIMIT]
+    return _dumps({**extra, "count": len(shown), "results": [tmdb.card(r) for r in shown]})
 
 
 def _brief(item: dict) -> dict:
-    """Identity of a title: enough to refer back to it in later tool calls."""
+    """Identity of a title: enough to refer back to it in a later tool call."""
     return {
         "tmdb_id": item["tmdb_id"],
         "media_type": item["media_type"],
@@ -86,16 +73,39 @@ def _saved_brief(row: dict) -> dict:
     return out
 
 
-def _clarify(title: str, candidates: list[dict]) -> str:
-    if not candidates:
-        return _err(f"No movie or TV show found for '{title}'. Ask the user to check the spelling.")
-    return _dumps(
-        {
-            "needs_clarification": True,
-            "message": f"'{title}' matches several titles. Ask the user which one, then call again "
-                       f"with tmdb_id and media_type.",
-            "candidates": [_card(c) for c in candidates],
-        }
+def _clarify(message: str, candidates: list[dict]) -> str:
+    return _dumps({"needs_clarification": True, "message": message, "candidates": candidates})
+
+
+def _bad_status(status: str | None) -> str | None:
+    if status and status not in WATCH_STATUSES:
+        return _err(f"status must be one of: {', '.join(WATCH_STATUSES)}.")
+    return None
+
+
+async def _details_or_none(tmdb_id: int, media_type: str) -> dict | tmdb.TMDBError:
+    try:
+        return await tmdb.get_details(tmdb_id, media_type)
+    except tmdb.TMDBError as e:
+        return e
+
+
+async def _lookup_by_id(tmdb_id: int, kind: str | None, title: str | None) -> tuple[dict | None, str | None]:
+    kinds = [kind] if kind else ["movie", "tv"]
+    outcomes = await asyncio.gather(*(_details_or_none(tmdb_id, k) for k in kinds))
+    found = [o for o in outcomes if isinstance(o, dict)]
+    if not found:
+        return None, _err(str(outcomes[0]), tmdb_id=tmdb_id)
+    if title:
+        named = [f for f in found if tmdb.same_title(f["title"], title)]
+        if named:
+            return named[0], None
+    if len(found) == 1:
+        return found[0], None
+    # The id exists as both a movie and a show and nothing says which one is meant.
+    return None, _clarify(
+        "This id matches a movie and a TV show. Call again with media_type.",
+        [_brief(f) for f in found],
     )
 
 
@@ -105,26 +115,10 @@ async def _lookup(
     media_type: str | None = None,
     year: int | str | None = None,
 ) -> tuple[dict | None, str | None]:
-    """Resolve a title or id on TMDB. Returns (item, None) or (None, json_error_for_the_model)."""
-    kind = database.normalize_media_type(media_type, default=None)
-
+    """Resolve a title or id on TMDB. Returns (item, None) or (None, json_message_for_the_model)."""
+    kind = normalize_media_type(media_type, default=None)
     if tmdb_id:
-        kinds = [kind] if kind else ["movie", "tv"]
-        fallback = None
-        error = None
-        for k in kinds:
-            try:
-                item = await tmdb.get_details(tmdb_id, k)
-            except tmdb.TMDBError as e:
-                error = e
-                continue
-            if not title or tmdb._norm_title(title) == tmdb._norm_title(item["title"]):
-                return item, None
-            fallback = fallback or item
-        if fallback:
-            return fallback, None
-        return None, _err(str(error), tmdb_id=tmdb_id)
-
+        return await _lookup_by_id(tmdb_id, kind, title)
     if not title or not title.strip():
         return None, _err("Provide a title or a tmdb_id.")
     try:
@@ -133,7 +127,12 @@ async def _lookup(
         return None, _err(str(e))
     if resolved["match"]:
         return resolved["match"], None
-    return None, _clarify(title, resolved["candidates"])
+    if not resolved["candidates"]:
+        return None, _err(f"No movie or TV show found for '{title}'. Ask the user to check the spelling.")
+    return None, _clarify(
+        f"'{title}' matches several titles. Ask the user which one, then call again with tmdb_id and media_type.",
+        [tmdb.card(c) for c in resolved["candidates"]],
+    )
 
 
 def _find_saved(
@@ -143,33 +142,28 @@ def _find_saved(
     media_type: str | None,
 ) -> tuple[dict | None, str | None]:
     """Find one entry in the user's own saved list by title or id."""
-    kind = database.normalize_media_type(media_type, default=None)
-    matches = [r for r in rows if (not kind or r["media_type"] == kind)]
+    kind = normalize_media_type(media_type, default=None)
+    matches = [r for r in rows if not kind or r["media_type"] == kind]
     if tmdb_id:
         matches = [r for r in matches if r["tmdb_id"] == tmdb_id]
     elif title:
-        wanted = tmdb._norm_title(title)
-        exact = [r for r in matches if tmdb._norm_title(r["title"]) == wanted]
-        matches = exact or [r for r in matches if wanted and wanted in tmdb._norm_title(r["title"])]
+        wanted = tmdb.normalize_title(title)
+        exact = [r for r in matches if tmdb.normalize_title(r["title"]) == wanted]
+        matches = exact or [r for r in matches if wanted and wanted in tmdb.normalize_title(r["title"])]
     else:
         return None, _err("Provide a title or a tmdb_id.")
 
     if not matches:
         return None, _err("That title is not in the user's saved list.")
     if len(matches) > 1:
-        return None, _dumps(
-            {
-                "needs_clarification": True,
-                "message": "Several saved titles match. Ask the user which one.",
-                "candidates": [_brief(m) for m in matches],
-            }
-        )
+        return None, _clarify("Several saved titles match. Ask the user which one.", [_brief(m) for m in matches])
     return matches[0], None
 
 
 # --------------------------------------------------------------------------- #
-# TMDB tools
+# Finding titles
 # --------------------------------------------------------------------------- #
+
 
 @mcp.tool()
 async def search_shows(query: str, media_type: str = "all", year: int | None = None, page: int = 1) -> str:
@@ -189,7 +183,7 @@ async def search_shows(query: str, media_type: str = "all", year: int | None = N
         results = await tmdb.search(query, media_type, year, page)
     except tmdb.TMDBError as e:
         return _err(str(e))
-    return _dumps({"query": query, "count": len(results[:LIST_LIMIT]), "results": [_card(r) for r in results[:LIST_LIMIT]]})
+    return _listing(results, query=query)
 
 
 @mcp.tool()
@@ -228,34 +222,7 @@ async def get_details(
         details = item if "cast" in item else await tmdb.get_details(item["tmdb_id"], item["media_type"])
     except tmdb.TMDBError as e:
         return _err(str(e), tmdb_id=item["tmdb_id"])
-    return _dumps(_card({k: v for k, v in details.items() if k != "backdrop_path"}))
-
-
-async def _related(
-    first,
-    second,
-    show_id: int | None,
-    media_type: str | None,
-    title: str | None,
-) -> str:
-    """Results of `first`, topped up from `second` when there are fewer than the limit."""
-    item, problem = await _lookup(title, show_id, media_type)
-    if problem:
-        return problem
-    try:
-        results = await first(item["tmdb_id"], item["media_type"])
-        if len(results) < LIST_LIMIT:
-            seen = {r["tmdb_id"] for r in results}
-            results += [r for r in await second(item["tmdb_id"], item["media_type"]) if r["tmdb_id"] not in seen]
-    except tmdb.TMDBError as e:
-        return _err(str(e), tmdb_id=item["tmdb_id"])
-    return _dumps(
-        {
-            "based_on": _brief(item),
-            "count": len(results[:LIST_LIMIT]),
-            "results": [_card(r) for r in results[:LIST_LIMIT]],
-        }
-    )
+    return _dumps(tmdb.card({k: v for k, v in details.items() if k != "backdrop_path"}))
 
 
 @mcp.tool()
@@ -270,7 +237,14 @@ async def get_similar(show_id: int | None = None, media_type: str | None = None,
         media_type: "movie" or "tv".
         title: Reference title, e.g. "Dark".
     """
-    return await _related(tmdb.get_recommended, tmdb.get_similar, show_id, media_type, title)
+    item, problem = await _lookup(title, show_id, media_type)
+    if problem:
+        return problem
+    try:
+        results = await tmdb.get_related(item["tmdb_id"], item["media_type"], LIST_LIMIT)
+    except tmdb.TMDBError as e:
+        return _err(str(e), tmdb_id=item["tmdb_id"])
+    return _listing(results, based_on=_brief(item))
 
 
 @mcp.tool()
@@ -286,11 +260,11 @@ async def get_trending(media_type: str = "all", window: str = "week", page: int 
         results = await tmdb.get_trending(media_type, window, page)
     except tmdb.TMDBError as e:
         return _err(str(e))
-    return _dumps({"window": window, "count": len(results[:LIST_LIMIT]), "results": [_card(r) for r in results[:LIST_LIMIT]]})
+    return _listing(results, window=window)
 
 
 @mcp.tool()
-async def discover(
+async def discover(  # noqa: PLR0913, PLR0917 - a tool's signature is its schema for the model
     media_type: str = "movie",
     genre: str | None = None,
     year: int | None = None,
@@ -316,17 +290,13 @@ async def discover(
             if genre_id is None:
                 names = [g["name"] for g in await tmdb.get_genres(media_type)]
                 return _err(f"Unknown genre '{genre}'.", valid_genres=names)
-        results = await tmdb.discover(media_type, genre_id, year, min_rating, sort_by, page)
+        results = await tmdb.discover(
+            media_type, genre_id=genre_id, year=year, min_rating=min_rating, sort_by=sort_by, page=page
+        )
     except tmdb.TMDBError as e:
         return _err(str(e))
-    return _dumps(
-        {
-            "filters": {k: v for k, v in {"media_type": media_type, "genre": genre, "year": year,
-                                          "min_rating": min_rating, "sort_by": sort_by}.items() if v},
-            "count": len(results[:LIST_LIMIT]),
-            "results": [_card(r) for r in results[:LIST_LIMIT]],
-        }
-    )
+    filters = {"media_type": media_type, "genre": genre, "year": year, "min_rating": min_rating, "sort_by": sort_by}
+    return _listing(results, filters={k: v for k, v in filters.items() if v})
 
 
 @mcp.tool()
@@ -346,6 +316,7 @@ async def list_genres(media_type: str = "movie") -> str:
 # --------------------------------------------------------------------------- #
 # Library: favorites
 # --------------------------------------------------------------------------- #
+
 
 @mcp.tool()
 async def add_favorite(
@@ -369,16 +340,14 @@ async def add_favorite(
     item, problem = await _lookup(title, tmdb_id, media_type, year)
     if problem:
         return problem
-    added = database.add_favorite(
-        item["tmdb_id"], item["title"], item["media_type"], item.get("year"), item.get("poster_path")
-    )
+    added = library.add_favorite(TitleRef.from_mapping(item))
     return _dumps({"success": True, "already_existed": not added, "item": _brief(item)})
 
 
 @mcp.tool()
 def list_favorites() -> str:
     """List every movie and TV show the user has favorited."""
-    favs = database.list_favorites()
+    favs = library.list_favorites()
     return _dumps({"count": len(favs), "favorites": [_saved_brief(f) for f in favs]})
 
 
@@ -391,16 +360,17 @@ def remove_favorite(title: str | None = None, tmdb_id: int | None = None, media_
         tmdb_id: Exact TMDB id, if known.
         media_type: "movie" or "tv", if both exist with the same name.
     """
-    row, problem = _find_saved(database.list_favorites(), title, tmdb_id, media_type)
+    row, problem = _find_saved(library.list_favorites(), title, tmdb_id, media_type)
     if problem:
         return problem
-    removed = database.remove_favorite(row["tmdb_id"], row["media_type"])
+    removed = library.remove_favorite(row["tmdb_id"], row["media_type"])
     return _dumps({"success": removed, "item": _brief(row)})
 
 
 # --------------------------------------------------------------------------- #
-# Library: watching
+# Library: watch list
 # --------------------------------------------------------------------------- #
+
 
 @mcp.tool()
 async def set_watching(
@@ -422,14 +392,12 @@ async def set_watching(
         year: Release year, to pick between remakes.
         status: "watching", "plan" or "watched".
     """
-    if status not in database.WATCH_STATUSES:
-        return _err(f"status must be one of: {', '.join(database.WATCH_STATUSES)}.")
+    if problem := _bad_status(status):
+        return problem
     item, problem = await _lookup(title, tmdb_id, media_type, year)
     if problem:
         return problem
-    added = database.set_watching(
-        item["tmdb_id"], item["title"], item["media_type"], item.get("year"), item.get("poster_path"), status
-    )
+    added = library.set_watching(TitleRef.from_mapping(item), status)
     return _dumps({"success": True, "already_existed": not added, "status": status, "item": _brief(item)})
 
 
@@ -440,9 +408,9 @@ def list_watching(status: str | None = None) -> str:
     Args:
         status: Optional filter: "watching", "plan" or "watched".
     """
-    if status and status not in database.WATCH_STATUSES:
-        return _err(f"status must be one of: {', '.join(database.WATCH_STATUSES)}.")
-    items = database.list_watching(status)
+    if problem := _bad_status(status):
+        return problem
+    items = library.list_watching(status)
     return _dumps({"count": len(items), "watching": [_saved_brief(i) for i in items]})
 
 
@@ -455,10 +423,10 @@ def remove_watching(title: str | None = None, tmdb_id: int | None = None, media_
         tmdb_id: Exact TMDB id, if known.
         media_type: "movie" or "tv", if both exist with the same name.
     """
-    row, problem = _find_saved(database.list_watching(), title, tmdb_id, media_type)
+    row, problem = _find_saved(library.list_watching(), title, tmdb_id, media_type)
     if problem:
         return problem
-    removed = database.remove_watching(row["tmdb_id"], row["media_type"])
+    removed = library.remove_watching(row["tmdb_id"], row["media_type"])
     return _dumps({"success": removed, "item": _brief(row)})
 
 
@@ -466,8 +434,9 @@ def remove_watching(title: str | None = None, tmdb_id: int | None = None, media_
 # Library: reviews
 # --------------------------------------------------------------------------- #
 
+
 @mcp.tool()
-async def save_review(
+async def save_review(  # noqa: PLR0913, PLR0917 - a tool's signature is its schema for the model
     rating: float,
     comment: str = "",
     title: str | None = None,
@@ -490,14 +459,12 @@ async def save_review(
         media_type: "movie" or "tv".
         year: Release year, to pick between remakes.
     """
-    if not 0 <= rating <= 10:
+    if not 0 <= rating <= 10:  # noqa: PLR2004 - rating scale
         return _err("Rating must be between 0 and 10.")
     item, problem = await _lookup(title, tmdb_id or show_id, media_type, year)
     if problem:
         return problem
-    database.save_review(
-        item["tmdb_id"], rating, comment, item["media_type"], item["title"], item.get("year"), item.get("poster_path")
-    )
+    library.save_review(TitleRef.from_mapping(item), rating, comment)
     return _dumps({"success": True, "item": _brief(item), "rating": rating})
 
 
@@ -510,7 +477,7 @@ def get_review(title: str | None = None, tmdb_id: int | None = None, media_type:
         tmdb_id: Exact TMDB id, if known.
         media_type: "movie" or "tv".
     """
-    row, problem = _find_saved(database.list_reviews(), title, tmdb_id, media_type)
+    row, problem = _find_saved(library.list_reviews(), title, tmdb_id, media_type)
     if problem:
         return problem if "needs_clarification" in problem else _dumps({"review": None})
     return _dumps({"review": _saved_brief(row)})
@@ -519,7 +486,7 @@ def get_review(title: str | None = None, tmdb_id: int | None = None, media_type:
 @mcp.tool()
 def list_reviews() -> str:
     """List all reviews the user has written."""
-    reviews = database.list_reviews()
+    reviews = library.list_reviews()
     return _dumps({"count": len(reviews), "reviews": [_saved_brief(r) for r in reviews]})
 
 
@@ -527,11 +494,12 @@ def list_reviews() -> str:
 # Personalization
 # --------------------------------------------------------------------------- #
 
+
 def _profile() -> dict:
     return {
-        "favorites": [_saved_brief(f) for f in database.list_favorites()],
-        "watching": [_saved_brief(w) for w in database.list_watching()],
-        "reviews": [_saved_brief(r) for r in database.list_reviews()],
+        "favorites": [_saved_brief(f) for f in library.list_favorites()],
+        "watching": [_saved_brief(w) for w in library.list_watching()],
+        "reviews": [_saved_brief(r) for r in library.list_reviews()],
     }
 
 
@@ -565,6 +533,7 @@ async def recommend_for_user(limit: int = 8) -> str:
 # Resources and prompt
 # --------------------------------------------------------------------------- #
 
+
 @mcp.resource("movies://user-profile")
 def user_profile_resource() -> str:
     """The user's saved state (favorites / watching / reviews) as JSON."""
@@ -577,7 +546,7 @@ async def genres_resource() -> str:
     try:
         return _dumps({"movie": await tmdb.get_genres("movie"), "tv": await tmdb.get_genres("tv")})
     except tmdb.TMDBError as e:
-        return _dumps({"error": str(e)})
+        return _err(str(e))
 
 
 @mcp.prompt()
@@ -593,16 +562,3 @@ def recommend_prompt(taste: str) -> str:
         "Return at most 5 titles. For each: title, year, TMDB rating, a one-sentence "
         "spoiler-free pitch, and why it fits their taste."
     )
-
-
-# --------------------------------------------------------------------------- #
-# Entrypoint
-# --------------------------------------------------------------------------- #
-
-if __name__ == "__main__":
-    if "--http" in sys.argv:
-        mcp.settings.host = "127.0.0.1"
-        mcp.settings.port = 8000
-        mcp.run(transport="streamable-http")
-    else:
-        mcp.run(transport="stdio")

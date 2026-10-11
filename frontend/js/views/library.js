@@ -61,9 +61,9 @@ export async function mountWatching(container, { setTitle }) {
   function render() {
     const counts = Object.fromEntries(TABS.map(([key]) => [key, key === "all" ? items.length : items.filter((i) => i.status === key).length]));
     const shown = tab === "all" ? items : items.filter((i) => i.status === tab);
-    const tabs = h("div", { class: "tabs", role: "tablist" }, TABS.map(([key, label]) =>
+    const tabs = h("div", { class: "tabs", role: "group", "aria-label": "Filter by status" }, TABS.map(([key, label]) =>
       h("button", {
-        class: "btn btn-ghost btn-sm tab", role: "tab", type: "button", "aria-selected": String(key === tab),
+        class: "btn btn-ghost btn-sm tab", type: "button", "aria-pressed": String(key === tab),
         onClick: () => { tab = key; render(); },
       }, label, h("span", { class: "tab-count" }, counts[key]))));
 

@@ -108,9 +108,8 @@ button:disabled { cursor: not-allowed; }
   transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
 }
 .segmented button:hover { color: var(--text); }
-.segmented button[aria-pressed="true"], .segmented button[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
-:root[data-theme="light"] .segmented button[aria-pressed="true"],
-:root[data-theme="light"] .segmented button[aria-selected="true"] { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+.segmented button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25); }
+:root[data-theme="light"] .segmented button[aria-pressed="true"] { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
 
 /* ---- badges and pills ---- */
 .pill {

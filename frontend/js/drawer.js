@@ -26,8 +26,23 @@ export function initDrawer() {
   closeButton.addEventListener("click", closeDetails);
   scrim.addEventListener("click", closeDetails);
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && drawer.classList.contains("is-open") && !document.querySelector(".modal-backdrop")) closeDetails();
+    if (!drawer.classList.contains("is-open") || document.querySelector(".modal-backdrop")) return;
+    if (event.key === "Escape") closeDetails();
+    else if (event.key === "Tab") trapFocus(event);
   });
+}
+
+const FOCUSABLE = 'a[href], button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+/** Keep keyboard focus inside the open drawer, like any modal dialog. */
+function trapFocus(event) {
+  const items = [...drawer.querySelectorAll(FOCUSABLE)].filter((el) => el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  if (!drawer.contains(document.activeElement)) { event.preventDefault(); first.focus(); }
+  else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
 
 export function closeDetails() {
@@ -131,7 +146,7 @@ function render(data) {
       item.overview ? h("p", { class: "overview" }, item.overview) : null,
       block("People", people),
       providers(item.where_to_watch),
-      chips(item.keywords) ? block("Themes", chips(item.keywords.slice(0, 8))) : null,
+      item.keywords?.length ? block("Themes", chips(item.keywords.slice(0, 8))) : null,
       h("section", { class: "detail-block", id: "similarBlock", hidden: true }, h("h3", {}, "More like this"), h("div", { class: "rail compact", id: "similarRail" })),
     ),
   );

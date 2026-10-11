@@ -110,7 +110,6 @@ function init() {
   document.addEventListener("themechange", syncThemeButton);
   window.addEventListener("hashchange", route);
   on("library", syncCounts);
-  on("route", () => {});
 
   syncThemeButton();
   loadLibrary();

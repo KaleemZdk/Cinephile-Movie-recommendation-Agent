@@ -1,37 +1,37 @@
+"""MCP tools, called directly with a tiny fake TMDB."""
+
 import json
 
 import pytest
 
-from mcp_server import database, server, tmdb
-
-
-def item(id_, title, kind="movie", year="2010", rating=8.0, pop=10.0):
-    return {"tmdb_id": id_, "media_type": kind, "title": title, "year": year, "rating": rating,
-            "genres": ["Drama"], "overview": "o", "poster_path": f"/{id_}.jpg", "popularity": pop}
+from cinephile import tmdb
+from cinephile.mcp_server import server
+from cinephile.storage import library
+from tests.factories import make_item
 
 
 @pytest.fixture
 def catalog(monkeypatch):
-    """A tiny fake TMDB: titles by name, details by (id, type)."""
+    """Titles by name for resolve_title, details by (id, type)."""
     titles = {
-        "whiplash": item(244786, "Whiplash", year="2014"),
-        "dark": item(70523, "Dark", "tv", "2017", pop=200),
-        "halloween": None,
+        "whiplash": make_item(244786, "Whiplash", year="2014"),
+        "dark": make_item(70523, "Dark", "tv", "2017", pop=200),
     }
-    halloween = [item(1, "Halloween", year="1978", pop=30), item(2, "Halloween", year="2018", pop=25)]
+    halloween = [make_item(1, "Halloween", year="1978", pop=30), make_item(2, "Halloween", year="2018", pop=25)]
+    both = [make_item(55, "Same Id Movie"), make_item(55, "Same Id Show", "tv")]
 
     async def resolve(title, media_type=None, year=None):
         key = title.strip().lower()
         if key == "halloween":
             return {"match": None, "candidates": halloween}
-        if titles.get(key):
+        if key in titles:
             return {"match": titles[key], "candidates": []}
         return {"match": None, "candidates": []}
 
     async def details(tmdb_id, media_type="movie"):
-        for t in list(titles.values()) + halloween:
-            if t and t["tmdb_id"] == tmdb_id and t["media_type"] == media_type:
-                return {**t, "cast": ["A"], "trailer_url": "https://youtu.be/x"}
+        for item in [*titles.values(), *halloween, *both]:
+            if item["tmdb_id"] == tmdb_id and item["media_type"] == media_type:
+                return {**item, "cast": ["A"], "trailer_url": "https://youtu.be/x"}
         raise tmdb.TMDBError("Not found on TMDB (404)")
 
     monkeypatch.setattr(tmdb, "resolve_title", resolve)
@@ -46,34 +46,41 @@ def load(text):
 async def test_add_favorite_by_title_only(catalog):
     out = load(await server.add_favorite(title="Whiplash"))
     assert out["success"] and not out["already_existed"] and out["item"]["tmdb_id"] == 244786
-    assert database.list_favorites()[0]["poster_path"] == "/244786.jpg"
-    again = load(await server.add_favorite(title="whiplash"))
-    assert again["already_existed"] is True
+    assert library.list_favorites()[0]["poster_path"] == "/244786.jpg"
+    assert load(await server.add_favorite(title="whiplash"))["already_existed"] is True
 
 
 async def test_add_favorite_ambiguous_asks_for_clarification(catalog):
     out = load(await server.add_favorite(title="Halloween"))
     assert out["needs_clarification"] and len(out["candidates"]) == 2
-    assert database.list_favorites() == []
+    assert library.list_favorites() == []
     chosen = load(await server.add_favorite(title="Halloween", tmdb_id=2, media_type="movie"))
     assert chosen["success"] and chosen["item"]["year"] == "2018"
 
 
-async def test_add_favorite_unknown_title_and_missing_args(catalog):
+async def test_id_without_media_type_that_exists_as_both_asks(catalog):
+    out = load(await server.add_favorite(tmdb_id=55))
+    assert out["needs_clarification"] and {c["media_type"] for c in out["candidates"]} == {"movie", "tv"}
+    assert load(await server.add_favorite(tmdb_id=55, title="Same Id Show"))["item"]["media_type"] == "tv"
+    assert load(await server.add_favorite(tmdb_id=244786))["item"]["title"] == "Whiplash"  # only one type exists
+
+
+async def test_unknown_title_and_missing_arguments(catalog):
     assert "error" in load(await server.add_favorite(title="nothing here"))
     assert "error" in load(await server.add_favorite())
+    assert "error" in load(await server.add_favorite(tmdb_id=999999))
 
 
-async def test_tv_show_saved_with_media_type(catalog):
+async def test_tv_show_is_saved_with_its_media_type(catalog):
     await server.add_favorite(title="Dark")
-    fav = database.list_favorites()[0]
+    fav = library.list_favorites()[0]
     assert (fav["tmdb_id"], fav["media_type"]) == (70523, "tv")
 
 
 async def test_remove_favorite_by_title_uses_saved_list(catalog):
     await server.add_favorite(title="Whiplash")
-    out = load(server.remove_favorite(title="whiplash"))
-    assert out["success"] and database.list_favorites() == []
+    assert load(server.remove_favorite(title="whiplash"))["success"]
+    assert library.list_favorites() == []
     assert "error" in load(server.remove_favorite(title="whiplash"))
 
 
@@ -92,7 +99,7 @@ async def test_save_review_validates_rating_and_accepts_show_id(catalog):
     assert "error" in load(await server.save_review(rating=11, title="Whiplash"))
     out = load(await server.save_review(rating=9.5, comment="Superb", show_id=244786, media_type="movie"))
     assert out["success"]
-    review = database.get_review(244786, "movie")
+    review = library.get_review(244786, "movie")
     assert review["rating"] == 9.5 and review["title"] == "Whiplash"
     reviews = load(server.list_reviews())
     assert reviews["count"] == 1 and reviews["reviews"][0]["comment"] == "Superb"
@@ -108,24 +115,19 @@ async def test_user_profile_contains_all_sections(catalog):
     assert profile["favorites"][0]["title"] == "Whiplash" and profile["watching"][0]["media_type"] == "tv"
 
 
-async def test_get_similar_by_title_and_fallback(monkeypatch, catalog):
-    async def similar(tmdb_id, media_type="movie", page=1):
-        return [item(5, "Close Match", media_type)]
+async def test_get_similar_by_title(monkeypatch, catalog):
+    async def related(tmdb_id, media_type="movie", limit=10):
+        return [make_item(5, "Close Match", media_type)]
 
-    async def recommended(tmdb_id, media_type="movie", page=1):
-        return []
-
-    monkeypatch.setattr(tmdb, "get_similar", similar)
-    monkeypatch.setattr(tmdb, "get_recommended", recommended)
+    monkeypatch.setattr(tmdb, "get_related", related)
     out = load(await server.get_similar(title="Dark"))
     assert out["based_on"]["title"] == "Dark" and out["results"][0]["title"] == "Close Match"
-    # recommendations are tried first and topped up from the similar list
-    assert [r["title"] for r in out["results"]] == ["Close Match"]
+    assert "popularity" not in out["results"][0]
 
 
-async def test_recommend_for_user_excludes_saved_and_falls_back_to_trending(monkeypatch, catalog):
+async def test_recommend_for_user_falls_back_to_trending_then_personalizes(monkeypatch, catalog):
     async def trending(media_type="all", window="week", page=1):
-        return [item(9, "Trending One")]
+        return [make_item(9, "Trending One")]
 
     monkeypatch.setattr(tmdb, "get_trending", trending)
     out = load(await server.recommend_for_user())
@@ -134,12 +136,11 @@ async def test_recommend_for_user_excludes_saved_and_falls_back_to_trending(monk
     await server.add_favorite(title="Whiplash")
 
     async def recommended(tmdb_id, media_type="movie", page=1):
-        return [item(244786, "Whiplash", year="2014"), item(11, "Fresh Pick")]
+        return [make_item(244786, "Whiplash", year="2014"), make_item(11, "Fresh Pick")]
 
     monkeypatch.setattr(tmdb, "get_recommended", recommended)
     out = load(await server.recommend_for_user())
-    titles = [r["title"] for r in out["results"]]
-    assert titles == ["Fresh Pick"]
+    assert [r["title"] for r in out["results"]] == ["Fresh Pick"]
     assert out["results"][0]["because_you_liked"] == ["Whiplash"]
 
 
@@ -152,5 +153,12 @@ async def test_discover_unknown_genre_lists_valid_names(monkeypatch):
 
     monkeypatch.setattr(tmdb, "resolve_genre_id", resolve)
     monkeypatch.setattr(tmdb, "get_genres", genres)
-    out = load(await server.discover(genre="Nope"))
-    assert out["valid_genres"] == ["Drama"]
+    assert load(await server.discover(genre="Nope"))["valid_genres"] == ["Drama"]
+
+
+async def test_tool_errors_are_reported_not_raised(monkeypatch):
+    async def boom(*args, **kwargs):
+        raise tmdb.TMDBError("Could not reach TMDB (ConnectError).")
+
+    monkeypatch.setattr(tmdb, "search", boom)
+    assert "TMDB" in load(await server.search_shows("x"))["error"]

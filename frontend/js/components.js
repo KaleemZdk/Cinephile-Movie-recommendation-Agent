@@ -113,18 +113,16 @@ export function errorState(message, retry) {
 /** Pill-style choice group. options: [[value, label], ...]. Calls onChange(value). */
 export function segmented(options, value, onChange, label) {
   const group = h("div", { class: "segmented", role: "group", "aria-label": label });
-  const buttons = options.map(([optionValue, optionLabel]) =>
-    h("button", {
+  for (const [optionValue, optionLabel] of options) {
+    group.append(h("button", {
       type: "button",
       "aria-pressed": String(optionValue === value),
-      onClick: () => {
-        buttons.forEach((b) => b.setAttribute("aria-pressed", String(b === button(optionValue))));
+      onClick: (event) => {
+        for (const button of group.children) button.setAttribute("aria-pressed", String(button === event.currentTarget));
         onChange(optionValue);
       },
-      dataset: { value: optionValue },
     }, optionLabel));
-  const button = (v) => buttons.find((b) => b.dataset.value === v);
-  group.append(...buttons);
+  }
   return group;
 }
 
