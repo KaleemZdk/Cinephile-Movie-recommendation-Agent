@@ -254,3 +254,13 @@ Changes to the plan because of this:
 - Stream tokens and tool status to the UI so the first visible output arrives in about 1 s instead of 6 s.
 - `GEMINI_MODEL` in `.env` is currently `gemini-3.8-flash`; switching the default is a local `.env` change plus a
   code default, and does not touch secrets.
+
+## Addendum: progress (2026-10-11)
+
+Phases 0 to 5 are done, most of phase 6 and the test part of phase 7. See the Status section of CLAUDE.md for the
+current list, including what is intentionally left (regenerate response, taste profile page, library export and import,
+document upload, per-thread model choice).
+
+Measured after the changes (gemini-3.5-flash-lite, real TMDB): plain reply 1.2 s, save or list action about 2.3 s with
+one tool call, recommendation turn 4 to 8 s, first words visible as soon as the final model call starts. Before: a plain
+"hi" took 21 s on gemini-3.8-flash and the next request failed with a daily quota error.
