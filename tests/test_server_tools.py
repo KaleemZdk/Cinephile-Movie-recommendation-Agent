@@ -119,8 +119,8 @@ async def test_get_similar_by_title_and_fallback(monkeypatch, catalog):
     monkeypatch.setattr(tmdb, "get_recommended", recommended)
     out = load(await server.get_similar(title="Dark"))
     assert out["based_on"]["title"] == "Dark" and out["results"][0]["title"] == "Close Match"
-    out = load(await server.get_recommended(title="Dark"))  # empty list falls back to similar
-    assert out["results"][0]["title"] == "Close Match"
+    # recommendations are tried first and topped up from the similar list
+    assert [r["title"] for r in out["results"]] == ["Close Match"]
 
 
 async def test_recommend_for_user_excludes_saved_and_falls_back_to_trending(monkeypatch, catalog):

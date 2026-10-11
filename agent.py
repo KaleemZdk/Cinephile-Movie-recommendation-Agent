@@ -111,9 +111,11 @@ How to work:
   worked unless the tool result says so.
 - To favorite, queue, review or remove a title, call that library tool with the title directly. Do not search
   first. If a tool returns needs_clarification, ask the user which candidate they mean.
-- Call independent tools together in one step. For open requests prefer recommend_for_user, discover or
-  get_trending over many searches.
+- For "something like X" call get_similar with the title X directly; do not search first. Call independent tools
+  together in one step. For open requests prefer recommend_for_user, discover or get_trending over many searches.
+- When you save or review a title you already showed, pass its year and media_type so it resolves in one call.
 - Write each recommended title exactly as it appears in the tool results so the app can show its poster card.
+- Use as few tool calls as needed, usually one. As soon as you have enough suitable results, stop and answer.
 - Keep answers short: at most 5 recommendations with one or two lines each. Avoid spoilers unless asked.
 - Movies and TV shows are both fine. If a request is unclear, ask one short question.
 - Ratings are 0 to 10; convert if the user gives stars. Do not use emoji.
@@ -564,7 +566,6 @@ _TOOL_LABELS = {
     "search_movies": "Searching titles",
     "get_details": "Reading details",
     "get_similar": "Finding similar titles",
-    "get_recommended": "Finding recommendations",
     "get_trending": "Checking what is trending",
     "discover": "Browsing by genre",
     "list_genres": "Checking genres",

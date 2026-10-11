@@ -16,7 +16,7 @@ from mcp_server import tmdb
 
 # Tools whose output lists titles worth showing as cards.
 CARD_TOOLS = {
-    "search_shows", "search_movies", "get_details", "get_similar", "get_recommended",
+    "search_shows", "search_movies", "get_details", "get_similar",
     "get_trending", "discover", "recommend_for_user",
 }
 MAX_CARDS = 6
@@ -51,6 +51,7 @@ def _tool_payload(message: ToolMessage) -> dict | None:
 def cards_from_turn(turn: list[BaseMessage], reply: str, limit: int = MAX_CARDS) -> list[dict]:
     """Titles returned by tools this turn, keeping only those the reply actually mentions."""
     found: dict[tuple, tuple[int, dict]] = {}
+    titles_seen: set[str] = set()  # one card per title, the first (best-ranked) one wins
     for message in turn:
         if not isinstance(message, ToolMessage) or message.name not in CARD_TOOLS:
             continue
@@ -66,12 +67,13 @@ def cards_from_turn(turn: list[BaseMessage], reply: str, limit: int = MAX_CARDS)
         for item in items:
             tid, title = item.get("tmdb_id"), item.get("title")
             key = (tid, item.get("media_type"))
-            if not tid or not title or key in found:
+            if not tid or not title or key in found or tmdb._norm_title(title) in titles_seen:
                 continue
             # Case-sensitive on purpose: otherwise the title "Her" would match the word "her".
             hit = re.search(rf"(?<!\w){re.escape(title)}(?!\w)", reply)
             if hit:
                 found[key] = (hit.start(), item)
+                titles_seen.add(tmdb._norm_title(title))
     ordered = sorted(found.values(), key=lambda pair: pair[0])
     return [ui_item(item) for _, item in ordered][:limit]
 

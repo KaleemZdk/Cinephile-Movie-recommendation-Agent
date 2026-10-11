@@ -52,6 +52,14 @@ def test_cards_dedupe_and_accept_single_details_payload():
     assert len(cards) == 1 and cards[0]["media_type"] == "tv"
 
 
+def test_cards_keep_one_card_per_title():
+    first = movie(1, "Severance", "tv", "2022")
+    others = [movie(2, "Severance", "movie", "1989"), movie(3, "Severance", "movie", "2006")]
+    turn = [tool_result("get_similar", {"results": [first]}), tool_result("search_shows", {"results": others}, "c2")]
+    cards = cards_from_turn(turn, "Watch Severance tonight.")
+    assert [(c["id"], c["media_type"]) for c in cards] == [(1, "tv")]
+
+
 def test_cards_ignore_library_tools_and_bad_json():
     turn = [tool_result("add_favorite", {"item": movie(1, "Heat")}),
             ToolMessage(content="not json", tool_call_id="c9", name="search_shows")]

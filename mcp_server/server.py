@@ -39,7 +39,7 @@ mcp = FastMCP(
     "movie-recommender",
     instructions=(
         "Tools for a movie and TV recommendation agent.\n"
-        "- Find titles: search_shows, get_details, get_similar, get_recommended, get_trending, "
+        "- Find titles: search_shows, get_details, get_similar, get_trending, "
         "discover, list_genres.\n"
         "- The user's library: add_favorite, list_favorites, remove_favorite, set_watching, "
         "list_watching, remove_watching, save_review, get_review, list_reviews.\n"
@@ -260,28 +260,17 @@ async def _related(
 
 @mcp.tool()
 async def get_similar(show_id: int | None = None, media_type: str | None = None, title: str | None = None) -> str:
-    """Titles similar to a given movie or TV show ("more like this").
+    """Titles similar to a given movie or TV show ("something like X", "more like this").
 
-    Give either show_id (the tmdb_id from an earlier result) or a title.
+    Pass the title directly; no search is needed first. Results combine TMDB's
+    recommendations with its similar-titles list, best matches first.
 
     Args:
-        show_id: TMDB id of the reference title.
-        media_type: "movie" or "tv". Recommended whenever show_id is given.
-        title: Reference title, if the id is not known.
+        show_id: TMDB id of the reference title, if you have it from an earlier result.
+        media_type: "movie" or "tv".
+        title: Reference title, e.g. "Dark".
     """
     return await _related(tmdb.get_recommended, tmdb.get_similar, show_id, media_type, title)
-
-
-@mcp.tool()
-async def get_recommended(tmdb_id: int | None = None, media_type: str | None = None, title: str | None = None) -> str:
-    """TMDB's "people who liked this also liked" list. Usually better targeted than get_similar.
-
-    Args:
-        tmdb_id: TMDB id of the reference title.
-        media_type: "movie" or "tv".
-        title: Reference title, if the id is not known.
-    """
-    return await _related(tmdb.get_recommended, tmdb.get_similar, tmdb_id, media_type, title)
 
 
 @mcp.tool()
@@ -367,8 +356,9 @@ async def add_favorite(
 ) -> str:
     """Save a movie or TV show to the user's favorites. Pass just the title; no search needed.
 
-    If the title is ambiguous the result has needs_clarification and candidates: ask the
-    user which one they mean, then call again with tmdb_id and media_type.
+    If you already showed the title, pass its year and media_type so it resolves in one
+    call. If the result has needs_clarification and candidates, ask the user which one
+    they mean, then call again with tmdb_id and media_type.
 
     Args:
         title: Title the user named, e.g. "Whiplash".
