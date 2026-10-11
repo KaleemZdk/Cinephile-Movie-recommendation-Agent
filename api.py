@@ -22,8 +22,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from groq import RateLimitError
 from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_google_genai.chat_models import GoogleRateLimitError as RateLimitError
 from pydantic import BaseModel
 
 ROOT = Path(__file__).resolve().parent
@@ -207,7 +207,7 @@ async def chat(body: ChatIn):
         )
     except RateLimitError:
         return {
-            "response": "I've hit the Groq rate limit. Give it a minute and try again.",
+            "response": "The Gemini model has hit its quota. Try again later or switch GEMINI_MODEL in .env.",
             "recommendations": [],
             "conversation_id": thread_id,
         }

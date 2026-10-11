@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local application data (databases, chat checkpoints, WAL files)
+data/*.db
+data/*.db-*
+mcp_server/*.db
+mcp_server/*.db-*
