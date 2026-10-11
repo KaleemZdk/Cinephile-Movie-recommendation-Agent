@@ -330,6 +330,16 @@ def _bound(model: str):
     return _llms[model]
 
 
+def model_status() -> list[dict]:
+    """Each configured model with whether it can be tried now, for the health endpoint."""
+    now = time.monotonic()
+    return [
+        {"name": m, "available": _cooldown.get(m, 0) <= now,
+         "retry_in": max(0, int(_cooldown.get(m, 0) - now))}
+        for m in model_chain()
+    ]
+
+
 async def invoke_with_fallback(messages: list[BaseMessage], preferred: str | None = None) -> AIMessage:
     """Call the first usable model in the chain; move on quickly when one is out of quota."""
     now = time.monotonic()

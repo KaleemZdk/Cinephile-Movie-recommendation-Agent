@@ -337,6 +337,18 @@ def remove_review(tmdb_id: int, media_type: str | None = None) -> bool:
     return _delete("reviews", tmdb_id, media_type)
 
 
+def update_meta(table: str, tmdb_id: int, media_type: str, year: str | None, poster_path: str | None) -> None:
+    """Fill in a missing year or poster on a saved title (never overwrites existing values)."""
+    if table not in _TABLES:
+        raise ValueError(f"Unknown table: {table}")
+    with connect() as conn:
+        conn.execute(
+            f"UPDATE {table} SET year = COALESCE(year, ?), poster_path = COALESCE(poster_path, ?) "
+            "WHERE tmdb_id = ? AND media_type = ?",
+            (year, poster_path, tmdb_id, normalize_media_type(media_type)),
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Shared helpers
 # --------------------------------------------------------------------------- #
