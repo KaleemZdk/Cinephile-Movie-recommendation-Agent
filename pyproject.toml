@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cinephile"
+version = "1.0.0"
+description = "AI assistant for movie and TV recommendations (FastAPI, LangGraph, MCP, TMDB)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["cinephile*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["data", "frontend"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import order
+    "N",         # naming
+    "B",         # bugbear
+    "UP",        # modern syntax
+    "SIM",       # simplifications
+    "C4",        # comprehensions
+    "BLE",       # blind excepts
+    "RUF",       # ruff-specific
+    "PL",        # pylint
+]
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "PLR0913", "PLR0917", "S101", "N802"]

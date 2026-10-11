@@ -1,0 +1,100 @@
+/* Chat: messages, streaming state, markdown, composer. */
+
+.chat { display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+.chat-scroll { flex: 1; min-height: 0; overflow: auto; scroll-behavior: smooth; }
+.chat-inner { max-width: var(--content-w); margin: 0 auto; padding: var(--space-5) var(--space-4) var(--space-4); display: grid; gap: var(--space-5); }
+
+/* empty state */
+.welcome { display: grid; justify-items: center; align-content: center; gap: var(--space-5); min-height: 100%; padding: var(--space-7) var(--space-4); text-align: center; }
+.welcome-mark { display: grid; place-items: center; width: 56px; height: 56px; border-radius: var(--radius-lg); background: var(--accent-soft); color: var(--accent-text); }
+.welcome-mark .icon { width: 28px; height: 28px; }
+.welcome h2 { font-size: var(--text-3xl); letter-spacing: -0.03em; font-weight: 700; }
+.welcome p { color: var(--text-2); max-width: 46ch; }
+.suggestions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); width: min(640px, 100%); }
+.suggestion {
+  display: grid; gap: var(--space-1); padding: var(--space-4); text-align: left;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+.suggestion:hover { border-color: var(--border-strong); background: var(--surface-2); }
+.suggestion strong { font-size: var(--text-sm); }
+.suggestion span { font-size: var(--text-xs); color: var(--text-3); }
+
+/* messages */
+.msg { display: grid; gap: var(--space-3); min-width: 0; }
+.msg-user { justify-items: end; }
+.bubble-user {
+  max-width: 85%; padding: var(--space-3) var(--space-4); border-radius: var(--radius-lg) var(--radius-lg) var(--radius-sm) var(--radius-lg);
+  background: var(--surface-3); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.msg-assistant { grid-template-columns: 32px minmax(0, 1fr); align-items: start; column-gap: var(--space-3); }
+.avatar { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-full); background: var(--accent-soft); color: var(--accent-text); }
+.avatar .icon { width: 16px; height: 16px; }
+.msg-body { min-width: 0; display: grid; gap: var(--space-3); padding-top: 3px; }
+.msg-tools { display: flex; gap: var(--space-1); margin-top: calc(var(--space-1) * -1); }
+
+.status {
+  display: inline-flex; align-items: center; gap: var(--space-2); width: fit-content;
+  padding: 4px var(--space-3); border-radius: var(--radius-full);
+  background: var(--surface-2); border: 1px solid var(--border); font-size: var(--text-xs); color: var(--text-2);
+}
+.typing { display: inline-flex; gap: 4px; padding: var(--space-2) 0; }
+.typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); animation: bounce 1.2s ease-in-out infinite; }
+.typing i:nth-child(2) { animation-delay: 0.15s; }
+.typing i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: 0.5; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+.msg-error { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3) var(--space-4); border-radius: var(--radius); background: var(--danger-soft); color: var(--text); font-size: var(--text-sm); }
+.msg-error .icon { color: var(--danger); margin-top: 1px; }
+.msg-error .btn { margin-top: var(--space-2); }
+.stopped { font-size: var(--text-xs); color: var(--text-3); }
+
+/* markdown inside assistant messages */
+.prose { overflow-wrap: anywhere; }
+.prose > * + * { margin-top: var(--space-3); }
+.prose p { line-height: 1.65; }
+.prose strong { font-weight: 600; color: var(--text); }
+.prose ul, .prose ol { margin-block: 0; padding-left: 1.25em; display: grid; gap: var(--space-2); }
+.prose li { line-height: 1.6; padding-left: 2px; }
+.prose li::marker { color: var(--text-3); }
+.prose h3, .prose h4 { font-size: var(--text-base); margin-top: var(--space-4); }
+.prose code { padding: 1px 6px; border-radius: var(--radius-sm); background: var(--surface-3); font-size: 0.9em; }
+.prose.is-streaming > :last-child::after { content: ""; display: inline-block; width: 7px; height: 1em; margin-left: 3px; vertical-align: text-bottom; background: var(--accent); border-radius: 2px; animation: caret 1s steps(2, start) infinite; }
+@keyframes caret { to { visibility: hidden; } }
+
+/* recommendation cards inside a message */
+.msg-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3); }
+
+/* jump to latest */
+.jump { position: absolute; left: 50%; bottom: 120px; transform: translateX(-50%); box-shadow: var(--shadow); }
+
+/* composer */
+.composer-wrap { flex: none; padding: 0 var(--space-4) var(--space-4); }
+.composer {
+  max-width: var(--content-w); margin: 0 auto; padding: var(--space-2);
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-xl);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+.composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.composer-row { display: flex; align-items: flex-end; gap: var(--space-1); }
+.composer textarea {
+  flex: 1; min-width: 0; max-height: 180px; padding: 10px var(--space-3); border: 0; background: transparent;
+  resize: none; line-height: 1.5; color: var(--text); font-size: var(--text-base);
+}
+.composer textarea:focus-visible { outline: none; }
+.composer textarea::placeholder { color: var(--text-3); }
+.send-btn { width: 40px; height: 40px; flex: none; display: grid; place-items: center; border-radius: var(--radius-full); background: var(--accent); color: var(--accent-ink); transition: background var(--fast) var(--ease), opacity var(--fast) var(--ease); }
+.send-btn:hover:not(:disabled) { background: var(--accent-hover); }
+.send-btn:disabled { background: var(--surface-3); color: var(--text-3); }
+.send-btn.is-stop { background: var(--text); color: var(--bg); }
+.composer-foot { max-width: var(--content-w); margin: var(--space-2) auto 0; text-align: center; font-size: var(--text-xs); color: var(--text-3); }
+
+@media (max-width: 640px) {
+  .suggestions { grid-template-columns: minmax(0, 1fr); }
+  .welcome h2 { font-size: var(--text-2xl); }
+  .msg-assistant { grid-template-columns: minmax(0, 1fr); }
+  .msg-assistant .avatar { display: none; }
+  .bubble-user { max-width: 92%; }
+  .msg-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
