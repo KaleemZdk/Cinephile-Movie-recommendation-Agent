@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import sys
 from collections.abc import AsyncIterator
 
@@ -94,6 +95,9 @@ class AgentRuntime:
                     "command": sys.executable,
                     "args": ["-m", "cinephile.mcp_server"],
                     "cwd": str(PROJECT_ROOT),
+                    # Without this the MCP client passes only a few safe variables, so keys set in the
+                    # host's dashboard (no .env file there) would never reach the tool server.
+                    "env": dict(os.environ),
                 },
             }
         )
