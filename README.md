@@ -57,7 +57,16 @@ tests/                 pytest suites and Node tests for the frontend
    ```
 
    Optional: `GEMINI_FALLBACK_MODELS` (comma separated), `TMDB_API_Read_Access_Token` (preferred over the v3 key),
-   `TMDB_REGION` (default US), `LLM_TIMEOUT` (seconds, default 40), `LOG_LEVEL` (default INFO).
+   `TMDB_REGION` (default US), `LLM_TIMEOUT` (seconds, default 40), `LOG_LEVEL` (default INFO),
+   `CINEPHILE_DATA_DIR` (where the SQLite files live), `CINEPHILE_SINGLE_USER` (see below).
+
+   Each browser that opens the app is a separate visitor with its own private library and chats, identified by a
+   random id in an HttpOnly cookie. No sign-up is needed; clearing cookies starts a fresh, empty visitor. On a
+   machine only you use, `CINEPHILE_SINGLE_USER=true` makes every browser share one library (including data saved
+   before visitors existed). Never set it on a public server.
+
+   When hosting (for example on Render), set the keys as environment variables in the host's dashboard and point
+   `CINEPHILE_DATA_DIR` at a persistent disk; otherwise saved data and chats are lost on every restart or redeploy.
 
 3. Install and run (Windows commands; on macOS or Linux use `.venv/bin/python`):
 

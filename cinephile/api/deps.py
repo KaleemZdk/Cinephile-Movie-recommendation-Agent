@@ -1,4 +1,4 @@
-"""Shared request dependencies (the agent runtime and the registry of running turns)."""
+"""Shared request dependencies: the agent runtime, the registry of running turns, and the visitor."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from cinephile.agent import AgentRuntime
+from cinephile.api.visitors import get_user_id
 
 
 class ThreadBusyError(Exception):
@@ -45,3 +46,4 @@ def get_turns(request: Request) -> TurnRegistry:
 
 RuntimeDep = Annotated[AgentRuntime, Depends(get_runtime)]
 TurnsDep = Annotated[TurnRegistry, Depends(get_turns)]
+UserDep = Annotated[str, Depends(get_user_id)]  # the visitor whose data a request may touch

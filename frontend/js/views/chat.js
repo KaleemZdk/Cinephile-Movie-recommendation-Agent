@@ -195,7 +195,8 @@ export async function mountChat(container, { threadId, setTitle, navigate, reloa
 
     const adopt = (thread) => {
       if (!thread) return;
-      if (!view.threadId) {
+      // The server starts a new thread when the one in the URL is gone (or belongs to someone else).
+      if (view.threadId !== thread.id) {
         view.threadId = thread.id;
         if (view.alive) {
           store.activeThreadId = thread.id;
@@ -265,6 +266,10 @@ export async function mountChat(container, { threadId, setTitle, navigate, reloa
       view.stick = true;
       scrollEnd(true);
     } catch (error) {
+      // A thread the server no longer has (for example after a redeploy) must not be reopened on every visit.
+      if (error.status === 404) {
+        try { localStorage.removeItem("cinephile.lastThread"); } catch { /* storage unavailable */ }
+      }
       toast("That chat could not be opened.", { error: true });
       navigate("#/chat");
       return () => { view.alive = false; container.classList.remove("is-chat"); };

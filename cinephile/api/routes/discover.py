@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Path, Query, status
 
 from cinephile import recommend, tmdb
+from cinephile.api.deps import UserDep
 from cinephile.api.presenters import ui_item
 from cinephile.api.schemas import MediaFilter, MediaType
 from cinephile.storage import library
@@ -72,9 +73,9 @@ async def genres(media_type: MediaType = "movie") -> dict:
 
 
 @router.get("/titles/{media_type}/{tmdb_id}")
-async def title_details(media_type: MediaType, tmdb_id: Annotated[int, Path(gt=0)]) -> dict:
+async def title_details(media_type: MediaType, tmdb_id: Annotated[int, Path(gt=0)], user_id: UserDep) -> dict:
     details = await _tmdb(tmdb.get_details(tmdb_id, media_type))
-    review = library.get_review(tmdb_id, media_type)
+    review = library.get_review(user_id, tmdb_id, media_type)
     return {
         **ui_item(details, "w500"),
         "backdrop_url": tmdb.image_url(details.get("backdrop_path"), "w780"),
@@ -90,8 +91,8 @@ async def title_details(media_type: MediaType, tmdb_id: Annotated[int, Path(gt=0
         "trailer_url": details.get("trailer_url"),
         "where_to_watch": details.get("where_to_watch"),
         "library": {
-            "favorite": library.is_favorite(tmdb_id, media_type),
-            "watching": library.get_watch_status(tmdb_id, media_type),
+            "favorite": library.is_favorite(user_id, tmdb_id, media_type),
+            "watching": library.get_watch_status(user_id, tmdb_id, media_type),
             "review": review["rating"] if review else None,
         },
     }
@@ -103,7 +104,7 @@ async def title_similar(media_type: MediaType, tmdb_id: Annotated[int, Path(gt=0
 
 
 @router.get("/for-you")
-async def for_you(limit: Annotated[int, Query(ge=1, le=20)] = 12) -> dict:
+async def for_you(user_id: UserDep, limit: Annotated[int, Query(ge=1, le=20)] = 12) -> dict:
     """Personal picks from the user's saved titles ("because you liked ...")."""
-    data = await _tmdb(recommend.personalized(limit))
+    data = await _tmdb(recommend.personalized(user_id, limit))
     return {"strategy": data["strategy"], "seeds": data["seeds"], **_wrap(data["results"])}

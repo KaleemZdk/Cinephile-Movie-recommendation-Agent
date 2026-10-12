@@ -22,6 +22,7 @@ from cinephile import __version__, tmdb
 from cinephile.agent import AgentRuntime
 from cinephile.api.deps import TurnRegistry
 from cinephile.api.routes import chat, discover, library, system, threads
+from cinephile.api.visitors import visitor_middleware
 from cinephile.config import configure_logging, get_settings
 from cinephile.storage.db import init_db
 
@@ -78,6 +79,7 @@ def create_app(runtime: AgentRuntime | None = None) -> FastAPI:
     app.state.turns = TurnRegistry()
 
     app.middleware("http")(_security_headers)
+    app.middleware("http")(visitor_middleware(settings.single_user))
     app.add_middleware(
         CORSMiddleware,  # the UI is same-origin; this only allows local tools
         allow_origin_regex=LOCAL_ORIGINS,

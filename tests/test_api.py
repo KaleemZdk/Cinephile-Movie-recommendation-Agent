@@ -1,6 +1,7 @@
 """HTTP API with a fake agent runtime and a fake TMDB (no network, no model quota)."""
 
 import json
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,11 +9,17 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from cinephile import tmdb
 from cinephile.agent import LLMUnavailableError
+from cinephile.api import app as app_module
+from cinephile.api import visitors
 from cinephile.api.app import create_app
 from cinephile.api.presenters import cards_from_turn, messages_to_ui, ui_item
+from cinephile.config import get_settings
 from cinephile.storage import library, threads
+from cinephile.storage.db import LOCAL_USER
 from cinephile.storage.library import TitleRef
 from tests.factories import make_item
+
+VISITOR = "visitor-one-" + "a" * 32
 
 
 def tool_result(name, payload, call_id="c1"):
@@ -29,6 +36,7 @@ class FakeRuntime:
         self.fail: Exception | None = None
         self.messages = []
         self.deleted = []
+        self.users = []
 
     def model_status(self):
         return [{"name": "m1", "available": True, "retry_in": 0}]
@@ -45,7 +53,8 @@ class FakeRuntime:
     async def delete_thread(self, thread_id):
         self.deleted.append(thread_id)
 
-    async def stream_turn(self, message, thread_id, model=None):
+    async def stream_turn(self, message, thread_id, model=None, *, user_id):
+        self.users.append(user_id)
         if self.fail:
             raise self.fail
         yield {"type": "tool_start", "tools": [{"name": "search_shows", "label": "Searching titles"}]}
@@ -66,7 +75,9 @@ def runtime():
 
 @pytest.fixture
 def client(runtime):
-    return TestClient(create_app(runtime))  # no `with`: the lifespan (MCP start) is skipped
+    c = TestClient(create_app(runtime))  # no `with`: the lifespan (MCP start) is skipped
+    c.cookies.set(visitors.COOKIE_NAME, VISITOR)
+    return c
 
 
 def parse_sse(text):
@@ -174,7 +185,7 @@ def test_chat_stream_creates_thread_and_sends_events_in_order(client):
     assert events[-2]["recommendations"][0]["title"] == "Heat"
     thread = events[0]["thread"]
     assert thread["title"] == "find me heat"
-    assert threads.get(thread["id"])
+    assert threads.get(VISITOR, thread["id"])
 
 
 def test_chat_stream_continues_an_existing_thread(client):
@@ -250,13 +261,13 @@ def test_favorite_validation(client, fake_details):
 
 
 def test_backfill_fills_missing_posters_of_older_rows(client, fake_details):
-    library.add_favorite(TitleRef(11, "movie", "Title 11"))
+    library.add_favorite(VISITOR, TitleRef(11, "movie", "Title 11"))
     assert client.get("/favorites").json()[0]["poster_url"].endswith("/11.jpg")
-    assert library.list_favorites()[0]["poster_path"] == "/11.jpg"
+    assert library.list_favorites(VISITOR)[0]["poster_path"] == "/11.jpg"
 
 
 def test_backfill_ignores_a_different_title(client, fake_details):
-    library.add_favorite(TitleRef(12, "movie", "Something Else Entirely"))
+    library.add_favorite(VISITOR, TitleRef(12, "movie", "Something Else Entirely"))
     assert client.get("/favorites").json()[0]["poster_url"] is None
 
 
@@ -317,9 +328,9 @@ def test_tmdb_failure_becomes_502(client, monkeypatch):
 
 def test_title_details_include_library_flags(client, fake_details):
     ref = TitleRef(8, "movie", "Title 8")
-    library.add_favorite(ref)
-    library.set_watching(ref, "plan")
-    library.save_review(ref, 9)
+    library.add_favorite(VISITOR, ref)
+    library.set_watching(VISITOR, ref, "plan")
+    library.save_review(VISITOR, ref, 9)
     data = client.get("/titles/movie/8").json()
     assert data["library"] == {"favorite": True, "watching": "plan", "review": 9.0}
     assert data["backdrop_url"].endswith("/b.jpg")
@@ -343,3 +354,67 @@ def test_security_headers_on_the_ui_only(client):
     api = client.get("/health")
     assert "content-security-policy" not in api.headers
     assert api.headers["x-frame-options"] == "DENY"
+
+
+# ----------------------------------------------------------------- visitors
+
+
+STRANGER = "visitor-two-" + "b" * 32
+
+
+def visitor_client(runtime, cookie=None):
+    c = TestClient(create_app(runtime))
+    if cookie:
+        c.cookies.set(visitors.COOKIE_NAME, cookie)
+    return c
+
+
+def test_first_visit_gets_a_private_cookie(runtime):
+    fresh = visitor_client(runtime)
+    cookie = fresh.get("/threads").headers["set-cookie"]
+    assert cookie.startswith(f"{visitors.COOKIE_NAME}=")
+    assert "httponly" in cookie.lower() and "samesite=lax" in cookie.lower()
+    assert "secure" not in cookie.lower()
+    assert "set-cookie" not in fresh.get("/threads").headers, "a known visitor keeps the same id"
+    assert "set-cookie" in fresh.get("/").headers, "page loads renew the cookie"
+
+    behind_tls_proxy = visitor_client(runtime).get("/threads", headers={"x-forwarded-proto": "https"})
+    assert "secure" in behind_tls_proxy.headers["set-cookie"].lower()
+
+
+def test_visitors_never_see_each_others_data(client, runtime, fake_details):
+    client.post("/favorites", json={"tmdb_id": 7, "media_type": "tv"})
+    client.post("/reviews", json={"tmdb_id": 5, "rating": 8})
+    tid = parse_sse(client.post("/chat/stream", json={"message": "hi"}).text)[0]["thread"]["id"]
+
+    stranger = visitor_client(runtime, STRANGER)
+    assert stranger.get("/favorites").json() == []
+    assert stranger.get("/reviews").json() == []
+    assert stranger.get("/library/ids").json() == {"favorites": [], "watching": {}, "reviews": {}}
+    assert stranger.get("/titles/tv/7").json()["library"]["favorite"] is False
+    assert stranger.get("/threads").json()["threads"] == []
+    assert stranger.get(f"/threads/{tid}").status_code == 404
+    assert stranger.patch(f"/threads/{tid}", json={"title": "mine now"}).status_code == 404
+    assert stranger.delete(f"/threads/{tid}").status_code == 404
+    events = parse_sse(stranger.post("/chat/stream", json={"message": "hi", "thread_id": tid}).text)
+    assert events[0]["thread"]["id"] != tid, "posting to someone else's thread starts a new one"
+
+    assert client.get(f"/threads/{tid}").json()["thread"]["title"] == "hi"
+    assert client.get("/titles/tv/7").json()["library"]["favorite"] is True
+    assert runtime.users == [VISITOR, STRANGER]
+
+
+def test_a_forged_short_cookie_cannot_reach_the_local_library(runtime):
+    library.add_favorite(LOCAL_USER, TitleRef(1, "movie", "Private", poster_path="/p.jpg"))
+    forged = visitor_client(runtime, LOCAL_USER)
+    resp = forged.get("/favorites")
+    assert resp.json() == []
+    assert resp.headers["set-cookie"].startswith(f"{visitors.COOKIE_NAME}=")
+
+
+def test_single_user_mode_shares_the_local_library(runtime, monkeypatch):
+    monkeypatch.setattr(app_module, "get_settings", lambda: replace(get_settings(), single_user=True))
+    library.add_favorite(LOCAL_USER, TitleRef(1, "movie", "Mine", poster_path="/p.jpg"))
+    resp = visitor_client(runtime).get("/favorites")
+    assert [f["title"] for f in resp.json()] == ["Mine"]
+    assert "set-cookie" not in resp.headers

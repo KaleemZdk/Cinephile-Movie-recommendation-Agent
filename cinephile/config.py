@@ -34,6 +34,7 @@ class Settings:
     tmdb_credential: str | None
     tmdb_region: str
     log_level: str
+    single_user: bool
 
 
 def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -72,6 +73,8 @@ def get_settings() -> Settings:
         or None,
         tmdb_region=(os.getenv("TMDB_REGION") or "US").upper(),
         log_level=(os.getenv("LOG_LEVEL") or "INFO").upper(),
+        # On a private machine every browser can share the one local library; never set this on a public server.
+        single_user=(os.getenv("CINEPHILE_SINGLE_USER") or "").strip().lower() in {"1", "true", "yes"},
     )
 
 

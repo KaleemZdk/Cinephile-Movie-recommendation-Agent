@@ -3,6 +3,9 @@
 The graph is agent <-> tools. Tools come from the MCP server, started once as a
 subprocess and kept open for the life of the app. Chat memory is stored per thread_id
 by a SQLite checkpointer.
+
+Every turn runs for one user. The user id travels in the graph config and is attached to
+each tool call as MCP request metadata, so the model never sees it and cannot change it.
 """
 
 from __future__ import annotations
@@ -10,13 +13,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import aiosqlite
 from langchain_core.messages import AIMessageChunk, BaseMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import START, MessagesState, StateGraph
@@ -55,8 +60,29 @@ def tool_label(name: str) -> str:
     return TOOL_LABELS.get(name, "Working")
 
 
-def _config(thread_id: str, model: str | None = None) -> RunnableConfig:
-    return {"configurable": {"thread_id": thread_id, "model": model}}
+def _config(thread_id: str, user_id: str | None = None, model: str | None = None) -> RunnableConfig:
+    return {"configurable": {"thread_id": thread_id, "user_id": user_id, "model": model}}
+
+
+def _user_of(config: RunnableConfig | None) -> str:
+    user_id = ((config or {}).get("configurable") or {}).get("user_id")
+    if not user_id:
+        raise RuntimeError("A turn ran without a user id; refusing to touch any library.")
+    return user_id
+
+
+def user_interceptor(session) -> Callable:
+    """Send each tool call with the turn's user id in the MCP request _meta.
+
+    The tool server reads and writes only that user's library. The interceptor calls the
+    session itself because the adapter's default handler cannot attach metadata.
+    """
+
+    async def call_as_user(request: MCPToolCallRequest, _handler: Callable) -> object:
+        user_id = _user_of(getattr(request.runtime, "config", None))
+        return await session.call_tool(request.name, request.args, meta={"user_id": user_id})
+
+    return call_as_user
 
 
 class AgentRuntime:
@@ -94,12 +120,15 @@ class AgentRuntime:
                     "command": sys.executable,
                     "args": ["-m", "cinephile.mcp_server"],
                     "cwd": str(PROJECT_ROOT),
+                    # Without this the MCP client passes only a few safe variables, so keys set in the
+                    # host's dashboard (no .env file there) would never reach the tool server.
+                    "env": dict(os.environ),
                 },
             }
         )
         try:
             async with client.session("cinephile") as session:
-                tools = await load_mcp_tools(session)
+                tools = await load_mcp_tools(session, tool_interceptors=[user_interceptor(session)])
                 if not ready.done():
                     ready.set_result(tools)
                 await stop.wait()
@@ -147,7 +176,7 @@ class AgentRuntime:
 
         async def call_model(state: MessagesState, config: RunnableConfig) -> dict:
             preferred = (config.get("configurable") or {}).get("model")
-            messages = [system_message(), *prepare_history(state["messages"])]
+            messages = [system_message(_user_of(config)), *prepare_history(state["messages"])]
             return {"messages": [await router.invoke(messages, preferred)]}
 
         builder = StateGraph(MessagesState)
@@ -191,8 +220,10 @@ class AgentRuntime:
 
     # ------------------------------------------------------------------ turns
 
-    async def stream_turn(self, message: str, thread_id: str, model: str | None = None) -> AsyncIterator[dict]:
-        """Run one turn and yield events as they happen:
+    async def stream_turn(
+        self, message: str, thread_id: str, model: str | None = None, *, user_id: str
+    ) -> AsyncIterator[dict]:
+        """Run one turn for one user and yield events as they happen:
 
             {"type": "token", "text": "..."}
             {"type": "tool_start", "tools": [{"name": ..., "label": ...}]}
@@ -206,7 +237,7 @@ class AgentRuntime:
         reply = ""
         async for mode, chunk in graph.astream(
             {"messages": [{"role": "user", "content": message}]},
-            config=_config(thread_id, model),
+            config=_config(thread_id, user_id, model),
             stream_mode=["messages", "updates"],
         ):
             if mode == "messages":
@@ -234,10 +265,10 @@ class AgentRuntime:
                         reply = extract_text(m.content)
         yield {"type": "done", "reply": reply, "turn": turn}
 
-    async def run_turn(self, message: str, thread_id: str, model: str | None = None) -> str:
+    async def run_turn(self, message: str, thread_id: str, model: str | None = None, *, user_id: str) -> str:
         """Run one turn without streaming and return the final reply."""
         reply = ""
-        async for event in self.stream_turn(message, thread_id, model):
+        async for event in self.stream_turn(message, thread_id, model, user_id=user_id):
             if event["type"] == "done":
                 reply = event["reply"]
         return reply

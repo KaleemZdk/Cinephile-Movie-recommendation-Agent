@@ -3,11 +3,26 @@
 import json
 
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from mcp.shared.memory import create_connected_server_and_client_session
 
 from cinephile import tmdb
+from cinephile.agent.runtime import user_interceptor
 from cinephile.mcp_server import server
 from cinephile.storage import library
 from tests.factories import make_item
+
+U = "user-1"
+REAL_USER = server._user
+
+
+@pytest.fixture(autouse=True)
+def as_user(monkeypatch):
+    """Tools normally read the user from the MCP request metadata."""
+    monkeypatch.setattr(server, "_user", lambda: U)
 
 
 @pytest.fixture
@@ -46,14 +61,14 @@ def load(text):
 async def test_add_favorite_by_title_only(catalog):
     out = load(await server.add_favorite(title="Whiplash"))
     assert out["success"] and not out["already_existed"] and out["item"]["tmdb_id"] == 244786
-    assert library.list_favorites()[0]["poster_path"] == "/244786.jpg"
+    assert library.list_favorites(U)[0]["poster_path"] == "/244786.jpg"
     assert load(await server.add_favorite(title="whiplash"))["already_existed"] is True
 
 
 async def test_add_favorite_ambiguous_asks_for_clarification(catalog):
     out = load(await server.add_favorite(title="Halloween"))
     assert out["needs_clarification"] and len(out["candidates"]) == 2
-    assert library.list_favorites() == []
+    assert library.list_favorites(U) == []
     chosen = load(await server.add_favorite(title="Halloween", tmdb_id=2, media_type="movie"))
     assert chosen["success"] and chosen["item"]["year"] == "2018"
 
@@ -73,14 +88,14 @@ async def test_unknown_title_and_missing_arguments(catalog):
 
 async def test_tv_show_is_saved_with_its_media_type(catalog):
     await server.add_favorite(title="Dark")
-    fav = library.list_favorites()[0]
+    fav = library.list_favorites(U)[0]
     assert (fav["tmdb_id"], fav["media_type"]) == (70523, "tv")
 
 
 async def test_remove_favorite_by_title_uses_saved_list(catalog):
     await server.add_favorite(title="Whiplash")
     assert load(server.remove_favorite(title="whiplash"))["success"]
-    assert library.list_favorites() == []
+    assert library.list_favorites(U) == []
     assert "error" in load(server.remove_favorite(title="whiplash"))
 
 
@@ -99,7 +114,7 @@ async def test_save_review_validates_rating_and_accepts_show_id(catalog):
     assert "error" in load(await server.save_review(rating=11, title="Whiplash"))
     out = load(await server.save_review(rating=9.5, comment="Superb", show_id=244786, media_type="movie"))
     assert out["success"]
-    review = library.get_review(244786, "movie")
+    review = library.get_review(U, 244786, "movie")
     assert review["rating"] == 9.5 and review["title"] == "Whiplash"
     reviews = load(server.list_reviews())
     assert reviews["count"] == 1 and reviews["reviews"][0]["comment"] == "Superb"
@@ -162,3 +177,46 @@ async def test_tool_errors_are_reported_not_raised(monkeypatch):
 
     monkeypatch.setattr(tmdb, "search", boom)
     assert "TMDB" in load(await server.search_shows("x"))["error"]
+
+
+# -------------------------------------------------------------------- users
+
+
+def text_of(message):
+    content = message.content
+    if isinstance(content, list):
+        content = "".join(block.get("text", "") if isinstance(block, dict) else str(block) for block in content)
+    return content
+
+
+async def test_each_turn_reaches_only_its_users_library(catalog, monkeypatch):
+    """The whole path: graph config -> interceptor -> MCP request _meta -> tool server -> SQLite."""
+    monkeypatch.setattr(server, "_user", REAL_USER)
+    async with create_connected_server_and_client_session(server.mcp) as session:
+        builder = StateGraph(MessagesState)
+        builder.add_node(
+            "tools", ToolNode(await load_mcp_tools(session, tool_interceptors=[user_interceptor(session)]))
+        )
+        builder.add_edge(START, "tools")
+        node = builder.compile()
+
+        async def call(user_id, name, args):
+            request = AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": "c1", "type": "tool_call"}])
+            out = await node.ainvoke({"messages": [request]}, config={"configurable": {"user_id": user_id}})
+            return load(text_of(out["messages"][-1]))
+
+        assert (await call("alice", "add_favorite", {"title": "Whiplash"}))["success"]
+        assert (await call("alice", "list_favorites", {}))["count"] == 1
+        assert (await call("bob", "list_favorites", {}))["count"] == 0
+        assert (await call("bob", "get_user_profile", {}))["favorites"] == []
+
+        unscoped = await session.call_tool("list_favorites", {})  # no user in the metadata
+        assert unscoped.isError
+
+    assert [f["title"] for f in library.list_favorites("alice")] == ["Whiplash"]
+    assert library.list_favorites("bob") == []
+
+
+def test_tools_refuse_to_run_without_a_user():
+    with pytest.raises(server.MissingUserError):
+        REAL_USER()

@@ -7,7 +7,7 @@ rules. Keep the "Status" section current.
 
 A movie and TV recommendation chat app, packaged as `cinephile/`:
 - `config.py` settings (only place that reads env vars). `tmdb.py` TMDB client. `recommend.py` personal picks.
-- `storage/` SQLite: `db.py` schema and migrations (schema version 2, plus the `threads` table), `library.py`
+- `storage/` SQLite: `db.py` schema and migrations (schema version 3: every row has a `user_id`), `library.py`
   favorites / watch list / reviews (`TitleRef` dataclass), `threads.py` chat index.
 - `mcp_server/` 19 MCP tools (`server.py`), started by the agent as `python -m cinephile.mcp_server` over stdio.
 - `agent/` `runtime.py` (`AgentRuntime`: MCP session, checkpointer, graph, `stream_turn`), `models.py`
@@ -26,7 +26,7 @@ subprocess -> TMDB / SQLite. Events: thread, status, token, cards, done, error.
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 .venv\Scripts\python -m cinephile [--reload] [--port 8000]   # web app, http://127.0.0.1:8000
 .venv\Scripts\python -m cinephile.agent                      # terminal chat (thread id "cli")
-.venv\Scripts\python -m pytest                               # 83 tests, no network
+.venv\Scripts\python -m pytest                               # 92 tests, no network
 .venv\Scripts\python -m ruff check . ; .venv\Scripts\python -m ruff format --check .
 node --test "tests/frontend/*.test.mjs"                      # markdown renderer
 ```
@@ -36,7 +36,8 @@ The old entry points `uvicorn api:app` and `python agent.py` no longer exist.
 ## Configuration (.env, git-ignored, never commit or print values)
 
 Keys: `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_FALLBACK_MODELS`, `TMDB_API_KEY`, `TMDB_API_Read_Access_Token`,
-`TMDB_REGION`, `LLM_TIMEOUT`, `LOG_LEVEL`, `CINEPHILE_DATA_DIR`, `MOVIES_DB_PATH`. `GROQ_API_KEY` is legacy and unused.
+`TMDB_REGION`, `LLM_TIMEOUT`, `LOG_LEVEL`, `CINEPHILE_DATA_DIR`, `MOVIES_DB_PATH`, `CINEPHILE_SINGLE_USER`.
+`GROQ_API_KEY` is legacy and unused. The MCP subprocess gets the full environment (hosts have no `.env`).
 
 Gemini facts (measured 2026-10-11, free tier):
 - Quotas are per model per day; `gemini-3.8-flash` allowed only 20 requests a day.
@@ -48,7 +49,11 @@ Gemini facts (measured 2026-10-11, free tier):
 
 ## Data (local, git-ignored)
 
-- `data/movies.db`: library (titles keyed by tmdb_id + media_type) and the `threads` index.
+- `data/movies.db`: library (titles keyed by user_id + tmdb_id + media_type) and the `threads` index.
+- Users: each browser gets a random visitor id in the HttpOnly cookie `cinephile_visitor` (`api/visitors.py`). Every
+  storage function takes the user id. The agent passes it to the MCP server in the tool call's `_meta`
+  (`user_interceptor` in `agent/runtime.py`), never through the model. Data from before users existed belongs to
+  `local` (used by the terminal chat and by `CINEPHILE_SINGLE_USER=true`); a cookie can never claim it.
 - `data/checkpoints.db`: LangGraph checkpoints by `thread_id`. The model sees a trimmed view; the checkpoint keeps all.
 - `data/legacy-mcp_server-movies.db`: an old unused duplicate from the first version, kept only in case it is needed.
 
@@ -78,6 +83,8 @@ Full plan and measurements: `PLAN.md`.
 - Structure pass (2026-10-12): code moved into the `cinephile` package with layered modules, ruff lint and format
   clean, pydantic validation, dependency injection, security headers and CSP, self-hosted font, accessibility fixes,
   83 Python tests and 7 Node tests. Verified in headless Chrome and with live Gemini and TMDB.
+- Hosting (2026-10-12): deployed on Render. Fixed TMDB key not reaching the MCP subprocess there. Added per-visitor
+  data (cookie id, schema version 3). Render's free disk is wiped on restart, so data needs a persistent disk.
 - Open a pull request to `main` only when the user asks.
 
 Known limits: the lite model sometimes makes extra tool calls on open-ended requests; chat history sent to the model is
