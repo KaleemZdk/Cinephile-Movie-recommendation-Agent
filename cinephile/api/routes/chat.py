@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import StreamingResponse
 
 from cinephile.agent import AgentRuntime, LLMUnavailableError
-from cinephile.api.deps import RuntimeDep, TurnRegistry, TurnsDep
+from cinephile.api.deps import RuntimeDep, TurnRegistry, TurnsDep, UserDep
 from cinephile.api.presenters import cards_from_turn
 from cinephile.api.schemas import ChatRequest
 from cinephile.storage import threads
@@ -36,9 +36,12 @@ BUSY_MESSAGE = "This chat is still answering the last message."
 SERVER_ERROR_MESSAGE = "Something went wrong while answering. Please try again."
 
 
-async def run_chat(runtime: AgentRuntime, turns: TurnRegistry, body: ChatRequest) -> AsyncIterator[dict]:
-    """Run one turn and yield UI events. Only one turn per thread runs at a time."""
-    thread = threads.ensure(body.thread, body.message, body.model)
+async def run_chat(runtime: AgentRuntime, turns: TurnRegistry, body: ChatRequest, user_id: str) -> AsyncIterator[dict]:
+    """Run one turn for a user and yield UI events. Only one turn per thread runs at a time.
+
+    A thread id the user does not own (or that no longer exists) starts a new thread.
+    """
+    thread = threads.ensure(user_id, body.thread, body.message, body.model)
     thread_id = thread["id"]
     if turns.busy(thread_id):
         yield {"type": "error", "kind": "busy", "message": BUSY_MESSAGE}
@@ -49,7 +52,7 @@ async def run_chat(runtime: AgentRuntime, turns: TurnRegistry, body: ChatRequest
         started = time.perf_counter()
         first_token: float | None = None
         try:
-            async for event in runtime.stream_turn(body.message, thread_id, body.model):
+            async for event in runtime.stream_turn(body.message, thread_id, body.model, user_id=user_id):
                 kind = event["type"]
                 if kind == "token":
                     first_token = first_token or time.perf_counter() - started
@@ -61,7 +64,7 @@ async def run_chat(runtime: AgentRuntime, turns: TurnRegistry, body: ChatRequest
                     reply = event["reply"].strip() or EMPTY_REPLY
                     cards = cards_from_turn(event["turn"], reply)
                     yield {"type": "cards", "recommendations": cards}
-                    yield {"type": "done", "reply": reply, "thread": threads.touch(thread_id)}
+                    yield {"type": "done", "reply": reply, "thread": threads.touch(user_id, thread_id)}
                     log.info(
                         "turn thread=%s first_token=%.2fs total=%.2fs cards=%d",
                         thread_id[:8],
@@ -85,9 +88,9 @@ def _sse(event: dict) -> str:
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest, runtime: RuntimeDep, turns: TurnsDep) -> StreamingResponse:
+async def chat_stream(body: ChatRequest, runtime: RuntimeDep, turns: TurnsDep, user_id: UserDep) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
-        async for event in run_chat(runtime, turns, body):
+        async for event in run_chat(runtime, turns, body, user_id):
             yield _sse(event)
 
     return StreamingResponse(
@@ -98,9 +101,9 @@ async def chat_stream(body: ChatRequest, runtime: RuntimeDep, turns: TurnsDep) -
 
 
 @router.post("/chat")
-async def chat(body: ChatRequest, runtime: RuntimeDep, turns: TurnsDep) -> dict:
+async def chat(body: ChatRequest, runtime: RuntimeDep, turns: TurnsDep, user_id: UserDep) -> dict:
     result: dict = {"response": "", "recommendations": [], "conversation_id": body.thread, "thread": None}
-    async for event in run_chat(runtime, turns, body):
+    async for event in run_chat(runtime, turns, body, user_id):
         kind = event["type"]
         if kind == "thread":
             result["thread"] = event["thread"]

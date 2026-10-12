@@ -1,4 +1,4 @@
-"""A minimal terminal chat. Uses the same thread memory as the web app (thread id "cli")."""
+"""A minimal terminal chat for the local user (thread id "cli")."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import asyncio
 from cinephile.agent.models import LLMUnavailableError
 from cinephile.agent.runtime import AgentRuntime, running
 from cinephile.config import configure_logging
-from cinephile.storage.db import init_db
+from cinephile.storage.db import LOCAL_USER, init_db
 
 THREAD_ID = "cli"
 EXIT_WORDS = frozenset({"exit", "quit"})
@@ -33,7 +33,7 @@ async def main() -> None:
             if not text:
                 continue
             try:
-                reply = await runtime.run_turn(text, THREAD_ID)
+                reply = await runtime.run_turn(text, THREAD_ID, user_id=LOCAL_USER)
             except LLMUnavailableError as exc:
                 reply = str(exc)
             print(f"\nCinephile: {reply}\n")

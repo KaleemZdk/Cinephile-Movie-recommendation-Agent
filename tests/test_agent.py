@@ -87,10 +87,10 @@ def test_prepare_history_trims_to_a_human_start():
 
 
 def test_system_message_includes_saved_titles():
-    assert profile_summary() == ""
-    library.add_favorite(TitleRef(1, "movie", "Whiplash", "2014"))
-    library.save_review(TitleRef(2, "tv", "Dark"), 9)
-    text = system_message().content
+    assert profile_summary("u1") == ""
+    library.add_favorite("u1", TitleRef(1, "movie", "Whiplash", "2014"))
+    library.save_review("u1", TitleRef(2, "tv", "Dark"), 9)
+    text = system_message("u1").content
     assert "Whiplash (2014)" in text and "Dark 9/10" in text and "Today is" in text
 
 

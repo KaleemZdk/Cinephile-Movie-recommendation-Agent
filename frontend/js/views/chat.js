@@ -195,7 +195,8 @@ export async function mountChat(container, { threadId, setTitle, navigate, reloa
 
     const adopt = (thread) => {
       if (!thread) return;
-      if (!view.threadId) {
+      // The server starts a new thread when the one in the URL is gone (or belongs to someone else).
+      if (view.threadId !== thread.id) {
         view.threadId = thread.id;
         if (view.alive) {
           store.activeThreadId = thread.id;

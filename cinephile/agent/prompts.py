@@ -39,12 +39,12 @@ def _label(row: dict) -> str:
     return f"{row['title']} ({row['year']})" if row.get("year") else row["title"]
 
 
-def profile_summary() -> str:
+def profile_summary(user_id: str) -> str:
     """The user's saved titles as a few lines of text (empty if nothing is saved)."""
     try:
-        favorites = library.list_favorites()[:MAX_FAVORITES]
-        watching = library.list_watching()[:MAX_WATCHING]
-        reviews = library.list_reviews()[:MAX_REVIEWS]
+        favorites = library.list_favorites(user_id)[:MAX_FAVORITES]
+        watching = library.list_watching(user_id)[:MAX_WATCHING]
+        reviews = library.list_reviews(user_id)[:MAX_REVIEWS]
     except sqlite3.Error:
         log.exception("Could not read the library for the profile summary")
         return ""
@@ -61,8 +61,8 @@ def profile_summary() -> str:
     return "What the user has saved (do not recommend these again):\n" + "\n".join(lines)
 
 
-def system_message() -> SystemMessage:
+def system_message(user_id: str) -> SystemMessage:
     parts = [SYSTEM_PROMPT, f"Today is {date.today().isoformat()}."]
-    if profile := profile_summary():
+    if profile := profile_summary(user_id):
         parts.append(profile)
     return SystemMessage(content="\n\n".join(parts))

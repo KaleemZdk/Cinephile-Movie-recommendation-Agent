@@ -1,7 +1,8 @@
-"""Index of chat threads: title, timestamps, pinned flag.
+"""Index of chat threads: owner, title, timestamps, pinned flag.
 
-The messages of each thread live in the LangGraph checkpointer; this table only holds
-what the chat list in the UI needs.
+The messages of each thread live in the LangGraph checkpointer under the thread id;
+this table holds what the chat list in the UI needs and who owns each thread. Every
+function takes the owner's id, so one user can never read or change another's thread.
 """
 
 from __future__ import annotations
@@ -30,45 +31,48 @@ def make_title(text: str) -> str:
 
 def _as_dict(row) -> dict:
     data = dict(row)
+    data.pop("user_id", None)
     data["pinned"] = bool(data["pinned"])
     return data
 
 
-def get(thread_id: str) -> dict | None:
+def get(user_id: str, thread_id: str) -> dict | None:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)).fetchone()
+        row = conn.execute("SELECT * FROM threads WHERE id = ? AND user_id = ?", (thread_id, user_id)).fetchone()
     return _as_dict(row) if row else None
 
 
-def create(title: str = DEFAULT_TITLE, model: str | None = None, thread_id: str | None = None) -> dict:
-    thread_id = thread_id or uuid.uuid4().hex
+def create(user_id: str, title: str = DEFAULT_TITLE, model: str | None = None) -> dict:
+    """A new thread with a random id (ids are never taken from the client)."""
+    thread_id = uuid.uuid4().hex
     now = now_iso()
     with connect() as conn:
         conn.execute(
-            "INSERT INTO threads (id, title, model, pinned, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)",
-            (thread_id, make_title(title), model, now, now),
+            "INSERT INTO threads (id, user_id, title, model, pinned, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, 0, ?, ?)",
+            (thread_id, user_id, make_title(title), model, now, now),
         )
-    return get(thread_id)
+    return get(user_id, thread_id)
 
 
-def touch(thread_id: str) -> dict | None:
+def touch(user_id: str, thread_id: str) -> dict | None:
     with connect() as conn:
-        conn.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now_iso(), thread_id))
-    return get(thread_id)
+        conn.execute("UPDATE threads SET updated_at = ? WHERE id = ? AND user_id = ?", (now_iso(), thread_id, user_id))
+    return get(user_id, thread_id)
 
 
-def ensure(thread_id: str | None, first_message: str, model: str | None = None) -> dict:
-    """Return the thread, creating it (titled from the first message) if it does not exist yet."""
-    if thread_id and get(thread_id):
-        return touch(thread_id)
-    return create(first_message, model, thread_id)
+def ensure(user_id: str, thread_id: str | None, first_message: str, model: str | None = None) -> dict:
+    """Return the user's thread, or a new one (titled from the first message) if they have no such thread."""
+    if thread_id and get(user_id, thread_id):
+        return touch(user_id, thread_id)
+    return create(user_id, first_message, model)
 
 
-def list_all(query: str | None = None) -> list[dict]:
-    sql = "SELECT * FROM threads"
-    params: list[str] = []
+def list_all(user_id: str, query: str | None = None) -> list[dict]:
+    sql = "SELECT * FROM threads WHERE user_id = ?"
+    params: list[str] = [user_id]
     if query and query.strip():
-        sql += " WHERE title LIKE ? ESCAPE '\\'"
+        sql += " AND title LIKE ? ESCAPE '\\'"
         escaped = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         params.append(f"%{escaped}%")
     sql += " ORDER BY pinned DESC, updated_at DESC"
@@ -76,18 +80,20 @@ def list_all(query: str | None = None) -> list[dict]:
         return [_as_dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def rename(thread_id: str, title: str) -> dict | None:
+def rename(user_id: str, thread_id: str, title: str) -> dict | None:
     with connect() as conn:
-        conn.execute("UPDATE threads SET title = ? WHERE id = ?", (make_title(title), thread_id))
-    return get(thread_id)
+        conn.execute(
+            "UPDATE threads SET title = ? WHERE id = ? AND user_id = ?", (make_title(title), thread_id, user_id)
+        )
+    return get(user_id, thread_id)
 
 
-def set_pinned(thread_id: str, pinned: bool) -> dict | None:
+def set_pinned(user_id: str, thread_id: str, pinned: bool) -> dict | None:
     with connect() as conn:
-        conn.execute("UPDATE threads SET pinned = ? WHERE id = ?", (int(pinned), thread_id))
-    return get(thread_id)
+        conn.execute("UPDATE threads SET pinned = ? WHERE id = ? AND user_id = ?", (int(pinned), thread_id, user_id))
+    return get(user_id, thread_id)
 
 
-def delete(thread_id: str) -> bool:
+def delete(user_id: str, thread_id: str) -> bool:
     with connect() as conn:
-        return conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,)).rowcount > 0
+        return conn.execute("DELETE FROM threads WHERE id = ? AND user_id = ?", (thread_id, user_id)).rowcount > 0

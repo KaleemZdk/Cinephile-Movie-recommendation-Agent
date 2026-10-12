@@ -5,6 +5,9 @@ or look up a title accept a plain `title` (optionally with `media_type` and `yea
 the agent does not need to search first. When a title is ambiguous the tool returns
 `needs_clarification` with candidates instead of guessing.
 
+Library tools act for the user named in the request's _meta (set by the agent runtime,
+never by the model). A library call without a user is refused.
+
 Every tool returns compact JSON text: it is read by the model, and size costs latency.
 """
 
@@ -40,6 +43,22 @@ mcp = FastMCP(
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+class MissingUserError(RuntimeError):
+    """A library tool was called without a user id in the request metadata."""
+
+
+def _user() -> str:
+    """The user this tool call is for, from the MCP request _meta."""
+    try:
+        meta = mcp.get_context().request_context.meta
+    except ValueError:  # not inside a request
+        meta = None
+    user_id = getattr(meta, "user_id", None)
+    if not isinstance(user_id, str) or not user_id:
+        raise MissingUserError("No user id in the request; the library is not available.")
+    return user_id
 
 
 def _dumps(payload: Any) -> str:
@@ -340,14 +359,14 @@ async def add_favorite(
     item, problem = await _lookup(title, tmdb_id, media_type, year)
     if problem:
         return problem
-    added = library.add_favorite(TitleRef.from_mapping(item))
+    added = library.add_favorite(_user(), TitleRef.from_mapping(item))
     return _dumps({"success": True, "already_existed": not added, "item": _brief(item)})
 
 
 @mcp.tool()
 def list_favorites() -> str:
     """List every movie and TV show the user has favorited."""
-    favs = library.list_favorites()
+    favs = library.list_favorites(_user())
     return _dumps({"count": len(favs), "favorites": [_saved_brief(f) for f in favs]})
 
 
@@ -360,10 +379,11 @@ def remove_favorite(title: str | None = None, tmdb_id: int | None = None, media_
         tmdb_id: Exact TMDB id, if known.
         media_type: "movie" or "tv", if both exist with the same name.
     """
-    row, problem = _find_saved(library.list_favorites(), title, tmdb_id, media_type)
+    user_id = _user()
+    row, problem = _find_saved(library.list_favorites(user_id), title, tmdb_id, media_type)
     if problem:
         return problem
-    removed = library.remove_favorite(row["tmdb_id"], row["media_type"])
+    removed = library.remove_favorite(user_id, row["tmdb_id"], row["media_type"])
     return _dumps({"success": removed, "item": _brief(row)})
 
 
@@ -397,7 +417,7 @@ async def set_watching(
     item, problem = await _lookup(title, tmdb_id, media_type, year)
     if problem:
         return problem
-    added = library.set_watching(TitleRef.from_mapping(item), status)
+    added = library.set_watching(_user(), TitleRef.from_mapping(item), status)
     return _dumps({"success": True, "already_existed": not added, "status": status, "item": _brief(item)})
 
 
@@ -410,7 +430,7 @@ def list_watching(status: str | None = None) -> str:
     """
     if problem := _bad_status(status):
         return problem
-    items = library.list_watching(status)
+    items = library.list_watching(_user(), status)
     return _dumps({"count": len(items), "watching": [_saved_brief(i) for i in items]})
 
 
@@ -423,10 +443,11 @@ def remove_watching(title: str | None = None, tmdb_id: int | None = None, media_
         tmdb_id: Exact TMDB id, if known.
         media_type: "movie" or "tv", if both exist with the same name.
     """
-    row, problem = _find_saved(library.list_watching(), title, tmdb_id, media_type)
+    user_id = _user()
+    row, problem = _find_saved(library.list_watching(user_id), title, tmdb_id, media_type)
     if problem:
         return problem
-    removed = library.remove_watching(row["tmdb_id"], row["media_type"])
+    removed = library.remove_watching(user_id, row["tmdb_id"], row["media_type"])
     return _dumps({"success": removed, "item": _brief(row)})
 
 
@@ -464,7 +485,7 @@ async def save_review(  # noqa: PLR0913, PLR0917 - a tool's signature is its sch
     item, problem = await _lookup(title, tmdb_id or show_id, media_type, year)
     if problem:
         return problem
-    library.save_review(TitleRef.from_mapping(item), rating, comment)
+    library.save_review(_user(), TitleRef.from_mapping(item), rating, comment)
     return _dumps({"success": True, "item": _brief(item), "rating": rating})
 
 
@@ -477,7 +498,7 @@ def get_review(title: str | None = None, tmdb_id: int | None = None, media_type:
         tmdb_id: Exact TMDB id, if known.
         media_type: "movie" or "tv".
     """
-    row, problem = _find_saved(library.list_reviews(), title, tmdb_id, media_type)
+    row, problem = _find_saved(library.list_reviews(_user()), title, tmdb_id, media_type)
     if problem:
         return problem if "needs_clarification" in problem else _dumps({"review": None})
     return _dumps({"review": _saved_brief(row)})
@@ -486,7 +507,7 @@ def get_review(title: str | None = None, tmdb_id: int | None = None, media_type:
 @mcp.tool()
 def list_reviews() -> str:
     """List all reviews the user has written."""
-    reviews = library.list_reviews()
+    reviews = library.list_reviews(_user())
     return _dumps({"count": len(reviews), "reviews": [_saved_brief(r) for r in reviews]})
 
 
@@ -496,10 +517,11 @@ def list_reviews() -> str:
 
 
 def _profile() -> dict:
+    user_id = _user()
     return {
-        "favorites": [_saved_brief(f) for f in library.list_favorites()],
-        "watching": [_saved_brief(w) for w in library.list_watching()],
-        "reviews": [_saved_brief(r) for r in library.list_reviews()],
+        "favorites": [_saved_brief(f) for f in library.list_favorites(user_id)],
+        "watching": [_saved_brief(w) for w in library.list_watching(user_id)],
+        "reviews": [_saved_brief(r) for r in library.list_reviews(user_id)],
     }
 
 
@@ -524,7 +546,7 @@ async def recommend_for_user(limit: int = 8) -> str:
         limit: Maximum number of results (1-20).
     """
     try:
-        return _dumps(await recommend.personalized(limit))
+        return _dumps(await recommend.personalized(_user(), limit))
     except tmdb.TMDBError as e:
         return _err(str(e))
 

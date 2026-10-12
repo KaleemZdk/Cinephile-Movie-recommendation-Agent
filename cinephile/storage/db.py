@@ -2,6 +2,9 @@
 
 Both the web API process and the MCP server process open the same file, so every
 connection uses WAL mode and a busy timeout.
+
+Every row belongs to one user (`user_id`). Web visitors get a random id from a cookie;
+LOCAL_USER owns data from before users existed and is used by the terminal chat.
 """
 
 from __future__ import annotations
@@ -16,7 +19,8 @@ from cinephile.config import get_settings
 
 DB_PATH: Path = get_settings().library_db  # tests point this at a temporary file
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+LOCAL_USER = "local"
 MEDIA_TYPES = ("movie", "tv")
 WATCH_STATUSES = ("plan", "watching", "watched")
 LIBRARY_TABLES = ("favorites", "watching", "reviews")
@@ -61,22 +65,24 @@ def normalize_media_type(media_type: str | None, default: str | None = "movie") 
 # Schema
 # --------------------------------------------------------------------------- #
 
-_SCHEMA = (
-    """
+_TABLES = {
+    "favorites": """
     CREATE TABLE IF NOT EXISTS favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
         tmdb_id INTEGER NOT NULL,
         media_type TEXT NOT NULL DEFAULT 'movie' CHECK (media_type IN ('movie', 'tv')),
         title TEXT NOT NULL,
         year TEXT,
         poster_path TEXT,
         added_at TEXT NOT NULL,
-        UNIQUE (tmdb_id, media_type)
+        UNIQUE (user_id, tmdb_id, media_type)
     )
     """,
-    """
+    "watching": """
     CREATE TABLE IF NOT EXISTS watching (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
         tmdb_id INTEGER NOT NULL,
         media_type TEXT NOT NULL DEFAULT 'movie' CHECK (media_type IN ('movie', 'tv')),
         title TEXT NOT NULL,
@@ -85,12 +91,13 @@ _SCHEMA = (
         status TEXT NOT NULL DEFAULT 'watching' CHECK (status IN ('plan', 'watching', 'watched')),
         added_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE (tmdb_id, media_type)
+        UNIQUE (user_id, tmdb_id, media_type)
     )
     """,
-    """
+    "reviews": """
     CREATE TABLE IF NOT EXISTS reviews (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
         tmdb_id INTEGER NOT NULL,
         media_type TEXT NOT NULL DEFAULT 'movie' CHECK (media_type IN ('movie', 'tv')),
         title TEXT NOT NULL DEFAULT '',
@@ -100,12 +107,13 @@ _SCHEMA = (
         comment TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE (tmdb_id, media_type)
+        UNIQUE (user_id, tmdb_id, media_type)
     )
     """,
-    """
+    "threads": """
     CREATE TABLE IF NOT EXISTS threads (
         id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
         title TEXT NOT NULL,
         model TEXT,
         pinned INTEGER NOT NULL DEFAULT 0,
@@ -113,11 +121,13 @@ _SCHEMA = (
         updated_at TEXT NOT NULL
     )
     """,
-)
+}
+_INDEXES = ("CREATE INDEX IF NOT EXISTS threads_by_user ON threads (user_id, updated_at)",)
+USER_TABLES = (*LIBRARY_TABLES, "threads")
 
 
 def _create_tables(conn: sqlite3.Connection) -> None:
-    for statement in _SCHEMA:
+    for statement in (*_TABLES.values(), *_INDEXES):
         conn.execute(statement)
 
 
@@ -134,15 +144,21 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
     _create_tables(conn)
 
     if "favorites" in legacy:
-        conn.execute("""
-            INSERT INTO favorites (tmdb_id, media_type, title, added_at)
-            SELECT tmdb_id, 'movie', title, added_at FROM favorites_v1
-        """)
+        conn.execute(
+            """
+            INSERT INTO favorites (user_id, tmdb_id, media_type, title, added_at)
+            SELECT ?, tmdb_id, 'movie', title, added_at FROM favorites_v1
+        """,
+            (LOCAL_USER,),
+        )
     if "watching" in legacy:
-        conn.execute("""
-            INSERT INTO watching (tmdb_id, media_type, title, status, added_at, updated_at)
-            SELECT tmdb_id, 'movie', title, 'watching', added_at, added_at FROM watching_v1
-        """)
+        conn.execute(
+            """
+            INSERT INTO watching (user_id, tmdb_id, media_type, title, status, added_at, updated_at)
+            SELECT ?, tmdb_id, 'movie', title, 'watching', added_at, added_at FROM watching_v1
+        """,
+            (LOCAL_USER,),
+        )
     if "reviews" in legacy:
         # An early version of the API kept review titles in a side table.
         title_sql = (
@@ -150,13 +166,29 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
             if _table_columns(conn, "known_titles")
             else "''"
         )
-        conn.execute(f"""
-            INSERT INTO reviews (tmdb_id, media_type, title, rating, comment, created_at, updated_at)
-            SELECT r.tmdb_id, 'movie', {title_sql}, r.rating, r.comment, r.created_at, r.created_at
+        conn.execute(
+            f"""
+            INSERT INTO reviews (user_id, tmdb_id, media_type, title, rating, comment, created_at, updated_at)
+            SELECT ?, r.tmdb_id, 'movie', {title_sql}, r.rating, r.comment, r.created_at, r.created_at
             FROM reviews_v1 r
-        """)
+            """,
+            (LOCAL_USER,),
+        )
     for table in legacy:
         conn.execute(f"DROP TABLE {table}_v1")
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Version 2 had one shared library. Its rows now belong to the local user."""
+    for table in USER_TABLES:
+        old_columns = _table_columns(conn, table)
+        if not old_columns or "user_id" in old_columns:
+            continue
+        conn.execute(f"ALTER TABLE {table} RENAME TO {table}_v2")
+        conn.execute(_TABLES[table])
+        columns = ", ".join(sorted(old_columns))
+        conn.execute(f"INSERT INTO {table} (user_id, {columns}) SELECT ?, {columns} FROM {table}_v2", (LOCAL_USER,))
+        conn.execute(f"DROP TABLE {table}_v2")
 
 
 def init_db() -> None:
@@ -165,6 +197,7 @@ def init_db() -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version < 2:  # noqa: PLR2004 - schema version number
             _migrate_v1_to_v2(conn)
+        _migrate_v2_to_v3(conn)
         _create_tables(conn)
         if version < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

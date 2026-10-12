@@ -25,7 +25,7 @@ class Seed:
     title: str
 
 
-def _seeds() -> list[Seed]:
+def _seeds(user_id: str) -> list[Seed]:
     """Best-rated reviews first, then favorites, then the watch list."""
     weighted: dict[tuple[int, str], Seed] = {}
 
@@ -34,20 +34,20 @@ def _seeds() -> list[Seed]:
         if key not in weighted:
             weighted[key] = Seed(weight, row["tmdb_id"], row["media_type"], row["title"])
 
-    for row in library.list_reviews():
+    for row in library.list_reviews(user_id):
         if row["rating"] >= MIN_SEED_RATING:
             add(row, row["rating"] / 10.0)
-    for row in library.list_favorites():
+    for row in library.list_favorites(user_id):
         add(row, FAVORITE_WEIGHT)
-    for row in library.list_watching():
+    for row in library.list_watching(user_id):
         add(row, WATCHING_WEIGHT)
     return sorted(weighted.values(), key=lambda s: -s.weight)[:MAX_SEEDS]
 
 
-async def personalized(limit: int = 8) -> dict:
+async def personalized(user_id: str, limit: int = 8) -> dict:
     """Ranked recommendations with a short reason each. Raises tmdb.TMDBError if TMDB is unreachable."""
     limit = max(1, min(limit, 20))
-    seeds = _seeds()
+    seeds = _seeds(user_id)
 
     if not seeds:
         trending = await tmdb.get_trending("all", "week")
@@ -66,7 +66,7 @@ async def personalized(limit: int = 8) -> dict:
     if len(failures) == len(batches):
         raise failures[0]
 
-    saved = library.saved_keys()
+    saved = library.saved_keys(user_id)
     candidates: dict[tuple[int, str], dict] = {}
     for seed, recs in zip(seeds, batches, strict=True):
         if isinstance(recs, BaseException):
