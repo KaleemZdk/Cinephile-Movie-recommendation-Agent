@@ -1,0 +1,14 @@
+{
+  "builds": [
+    {
+      "src": "cinephile/api/app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "cinephile/api/app.py"
+    }
+  ]
+}
